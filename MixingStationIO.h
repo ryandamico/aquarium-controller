@@ -919,22 +919,125 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
             }
             */
 
-            unsigned long totalSensorDurationUs = 0;
-            unsigned long sensorLastTriggeredTs = 0;
-            bool sensorLastTriggerState = false;
-            unsigned int numTriggers = 0;
+            unsigned long totalSensorDurationUs = 0; // Total accumulated sensor obstruction time
+            unsigned long sensorLastTriggeredTs = 0; // Timestamp when sensor was last triggered
+            bool sensorLastTriggerState = false; // Tracks the last sensor state
+            unsigned int numTriggers = 0; // Count of how many times the sensor was obstructed
+
+// version 3 below (see https://chatgpt.com/c/67c48eb3-4188-800a-a2bc-f8e4c2611d4f)
+            // Ensure system processes pending tasks before starting
+            Particle.process();
+            
+            // Turn on the dosing pump
+            this->digitalWriteOrReset(MixingStationIO::Components::DOSING_PUMP, HIGH);
+            
+            unsigned long startUs = micros(); // Start time of the dosing process
+            unsigned long nowUs;
+            bool timedOut = false;
+            const unsigned long maxTime = DOSING_PUMP_MAX_TIME_SEC * 1000 * 1000;
+            
+            // Define thresholds
+            const unsigned long INITIAL_OBSTRUCTION_THRESHOLD_US = 100; // Minimum obstruction before moving to step 2
+            const float EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_US = 35000; //modified from 24726 from calibration
+            unsigned long targetSensorDurationUs = EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_US * dosageMl;
+            
+            unsigned long timeToFirstDetectionUs = 0; // Track when first liquid is detected
+            
+            // ======================= STEP 1: PRIMING ======================= //
+            // Wait until at least 100µs of total obstruction time is detected
+            do {
+                nowUs = micros();
+                bool sensorTriggered = (this->digitalReadOrReset(MixingStationIO::Components::DOSING_PUMP_SENSOR) == ACTIVE_LOW);
+            
+                if (sensorTriggered && !sensorLastTriggerState) { 
+                    // Sensor was just triggered
+                    sensorLastTriggeredTs = nowUs;
+                    sensorLastTriggerState = true;
+                } else if (!sensorTriggered && sensorLastTriggerState) { 
+                    // Sensor was just untriggered
+                    unsigned long duration = nowUs - sensorLastTriggeredTs;
+                    totalSensorDurationUs += duration;
+                    numTriggers++;
+                    sensorLastTriggerState = false;
+            
+                    // Capture time to first detection
+                    if (numTriggers == 1) {
+                        timeToFirstDetectionUs = nowUs - startUs;
+                    }
+                }
+            
+                // Timeout handling
+                if (nowUs - startUs >= maxTime) {
+                    timedOut = true;
+                    break;
+                }
+            
+            } while (totalSensorDurationUs < INITIAL_OBSTRUCTION_THRESHOLD_US);
+            
+            // ======================= STEP 2: DOSING UNTIL TARGET REACHED ======================= //
+            // Continue running the pump until the expected total sensor duration is reached
+            do {
+                nowUs = micros();  // Update `nowUs` every loop iteration
+                bool sensorTriggered = (this->digitalReadOrReset(MixingStationIO::Components::DOSING_PUMP_SENSOR) == ACTIVE_LOW);
+            
+                if (sensorTriggered && !sensorLastTriggerState) { // start of a droplet
+                    sensorLastTriggeredTs = nowUs;
+                    sensorLastTriggerState = true;
+                } else if (!sensorTriggered && sensorLastTriggerState) { // end of a droplet
+                    unsigned long duration = nowUs - sensorLastTriggeredTs;
+                    totalSensorDurationUs += duration;
+                    numTriggers++;
+                    sensorLastTriggerState = false;
+                }
+            
+                // Timeout check to prevent infinite looping
+                if (nowUs - startUs >= maxTime) {
+                    timedOut = true;
+                    break;
+                }
+            
+            } while (totalSensorDurationUs < targetSensorDurationUs);
+            
+            // Turn off the pump after reaching the target duration
+            this->digitalWriteOrReset(MixingStationIO::Components::DOSING_PUMP, LOW);
+            
+            // Record elapsed time
+            unsigned long actualElapsedTime = micros() - startUs;
+            
+            // Handle timeout errors
+            if (timedOut) {
+                lcd->display("Error: Timed out", String::format("after %d ms", DOSING_PUMP_MAX_TIME_SEC * 1000), 3);
+                Particle.publish("dosePrime()", String::format("Error: Dosing timed out after %d ms", DOSING_PUMP_MAX_TIME_SEC * 1000));
+                return false;
+            }
+            
+            // Debug output for verification
+            lcd->display("... success!", "", 2);
+            Particle.publish("dosePrime()", String::format(
+                "Dosing complete. Target Volume: %.1f mL, totalSensorDurationUs: %u us, numTriggers: %d, elapsedTime: %u ms, timeToFirstDetectionUs: %u us",
+                dosageMl, totalSensorDurationUs, numTriggers, actualElapsedTime / 1000, timeToFirstDetectionUs
+            ));
+            return true;
+            
+            
+            
+
+
+
+// version 2 below 
+/*
 
             // testing, as during the 3rd successive retry the device resets
             Particle.process();
 
             this->digitalWriteOrReset(MixingStationIO::Components::DOSING_PUMP, HIGH);
-            unsigned long startUs = micros();
             unsigned long timeToFirstDetectionUs = 0; // now in uS
             bool timedOut = false;
             const unsigned long maxTime = DOSING_PUMP_MAX_TIME_SEC*1000*1000;
             
             // see how often we detect liquid
             // testing v2: using microseconds instead of milliseconds in case millis is too coarse of a resolution to yeild a meaningfully accurate "totalSensorDuration" figure
+            unsigned long startUs = micros();
             unsigned long nowUs;
             do {
                 nowUs = micros();
@@ -957,7 +1060,8 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
                 }
             } 
 
-            // note: allow up tp 10 seconds to detect the first liquid, e.g. if Prime solution was just swapped out
+            // note: above we allow up tp 10 seconds to detect the first liquid, e.g. if Prime solution was just swapped out
+            // then we continue below
             while (nowUs - startUs < ((numTriggers == 0) ? 10*1000*1000 : calculatedDosageTimeMs*1000 + timeToFirstDetectionUs)); // note: we measure dosing time based on when the first liquid was detected
             unsigned long actualElapsedTime = micros() - startUs;
             
@@ -968,6 +1072,7 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
                 Particle.publish("dosePrime()", String::format("Error: Dosing timed out after %d ms", DOSING_PUMP_MAX_TIME_SEC*1000));
                 return false;
             }
+*/            
 
             // v1 below
             /*
@@ -1011,6 +1116,9 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
             //   when Water supply was running out, totalSensorDurationMs went down to 22 and then 0 (numTriggers went down to 7 and 0)
             // ** update: when dosePrime() kept failing (with totalSensorDurations of about 75ms), it turned out that the IR RX/TX pair was dirty with dried seachem prime. Wiping them off with your finger fixed the problem, and now the dosing is succeeding (with totalSensorDurations around 198ms)
             // ** update 2: after adding longer tubing for the dosing pump, we started erroring out here. after measuring twice, we got just about 1ml when: totalSensorDurationMs = 104 (then 80), timeToFirstDetection = 313ms (then 44ms), numTriggers = 88 (then 67).
+            
+// commenting out as of version 3
+/*
             const float EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS = (100 * 0.50); // loosening this up a bit (120 * 0.50); // includes 50% fudge factor  // (300 * 0.50); // includes 50% fudge factor 
             if (totalSensorDurationUs < EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS * 1000 * dosageMl) {
                 lcd->display("Error: Volume", "too low");
@@ -1024,6 +1132,7 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
 
             lcd->display("... success!", "", 2);
             return true;
+*/            
         }
         
         bool drainReservoir() {

@@ -4324,7 +4324,7 @@ bool mixingStation_drainAquarium(int passcode, bool leaveValvesFilterAndHeaterFo
     // NOTE: Do not return below this line without first calling enableFilterAndHeatWithAlert() ****
     // ============================================================================================================
     
-    #define PARTIAL_DRAIN_TIMEOUT_SEC 75 // 55 //40 // need to test once more, but I think 40 sec is a pretty accurate threshold here 
+    #define PARTIAL_DRAIN_TIMEOUT_SEC 200 // was 75 prior to temp drain hookup in garage // 55 //40 // need to test once more, but I think 40 sec is a pretty accurate threshold here 
     unsigned long start = millis();
     unsigned long secondsLastUpdated = 0;
     particle::Future<bool> publishFuture; // use to make Publish() asynchronous so it doesn't block (and the pump can't get hung stuck on). details: https://docs.particle.io/firmware/low-power/stop-sleep-cellular/#the-future
