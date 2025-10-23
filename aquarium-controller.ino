@@ -414,6 +414,7 @@ retained long dosingPump2LastRunEpoch_Retained = -1;
 retained long dosingPump3LastRunEpoch_Retained = -1;
 retained bool uptimeExceededOneMinute = false; // used to enter into safe mode if we reset/hang/etc before one minute of looping
 retained long fullWaterChangeLastRunEpoc_Retained = -1;
+retained int lastAlertedTempFloor = 999; // Tracks lowest degree threshold alerted for temperature warnings (999 = no alert active)
 /* ---------------------------------------- */
 
 // note: now making this a non-retained variable starting off true, which is the value we expect nominally
@@ -2243,7 +2244,6 @@ bool flag__cloud_tempTest = false;
 
 bool flag__flowRateTooLowAfterEnablingCanisterFilter = false;
 bool flag__tempTooHigh = false;
-bool flag__tempTooLow = false;
 bool flag__flowRateTooLow = false;
 
 system_tick_t timeSinceLcdUpdate = 0;
@@ -3673,32 +3673,35 @@ void doTempTempChecks(double &tempInF, double &tempOutF, double &flowRate) {
     }
 
     if ((tempInF < 73 || tempOutF < 73) && (mixingStation.waterLastPumpedToAquarium == 0 || millis() - mixingStation.waterLastPumpedToAquarium > 10*60*1000)) { // new: allow time for heating if water was just changed
-        if (!flag__tempTooLow) {
-            flag__tempTooLow = true;
+
+        int currentTempFloor = (int)floor(min(tempInF, tempOutF));
+
+        // Alert if we've crossed a new (lower) degree threshold
+        if (currentTempFloor < lastAlertedTempFloor && currentTempFloor < 73) {
+            lastAlertedTempFloor = currentTempFloor;
+
             errorBeep();
             errorBeep();
             lcd.setRGB(LCD_RGB_WARNING);
-            lcd.display("WARNING: Temp", "too low", 1);
-            
-            //PushNotification::send(String::format("WARNING: Temperature too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF));
-            static PushNotification notification_tempTooLow(60min);
-            notification_tempTooLow.sendWithCooldown(String::format("WARNING: Temperature too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF), false); //~~~~~true); // stopping false critical alarms for now
+            lcd.display(String::format("ALERT: %.1fF", min(tempInF, tempOutF)), "Temp dropping!", 1);
 
-            
-            /*
-            for (int i=0; i<3; i++) {
-                // jiggle the relay in case it's stuck
-                relayModule.setHeater(false);
-                delay(200);
-                relayModule.setHeater(true);
-                delay(200);
-            }
-            */
+            // Critical alert - no cooldown needed since floor tracking prevents spam
+            PushNotification::send(
+                String::format("CRITICAL: Temperature dropped to %d°F (inlet: %.2f°F, outlet: %.2f°F)",
+                              currentTempFloor, tempInF, tempOutF),
+                true  // critical
+            );
         }
-    } else if (flag__tempTooLow) {
-        flag__tempTooLow = false;
+
+    } else if (lastAlertedTempFloor < 73) {
+        // Temperature recovered above 73°F
+        lastAlertedTempFloor = 999;  // Reset for next incident
         relayModule.setHeater(true);
-        PushNotification::send(String::format("Update: Temperature no longer too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF));
+
+        PushNotification::send(
+            String::format("Recovery: Temperature restored (inlet: %.2f°F, outlet: %.2f°F)",
+                          tempInF, tempOutF)
+        );
         lcd.setRGB(LCD_RGB_NORMAL);
     }
 }
