@@ -1,3 +1,8 @@
+
+// (old) **NOTE** Ryan added WITH_LOCK() statements
+// update: consider using more standard library and another one specifically for the PCA9633 RGB controller here
+// update: removed delay statement(s) to significantly speed up the display
+
 #include <Arduino.h>
 #include <stdio.h>
 #include <string.h>
@@ -85,12 +90,15 @@ inline void Waveshare_LCD1602_RGB::command(uint8_t value)
 
 void Waveshare_LCD1602_RGB::send(uint8_t *data, uint8_t len)
 {
-    Wire.beginTransmission(LCD_ADDRESS);        // transmit to device #4
-    for(int i=0; i<len; i++) {
-        Wire.write(data[i]);
-		delay(5);
-    }
-    Wire.endTransmission();                     // stop transmitting
+    //WITH_LOCK(Wire) { // added by Ryan
+        Wire.beginTransmission(LCD_ADDRESS);        // transmit to device #4
+        for(int i=0; i<len; i++) {
+            Wire.write(data[i]);
+    		////delay(5); // was here in original library
+    		///delayMicroseconds(50); // Ryan testing
+        }
+        Wire.endTransmission();                     // stop transmitting
+    //}
 }
 
 void Waveshare_LCD1602_RGB::display() {
@@ -106,10 +114,12 @@ void Waveshare_LCD1602_RGB::clear()
 
 void Waveshare_LCD1602_RGB::setReg(uint8_t addr, uint8_t data)
 {
-    Wire.beginTransmission(RGB_ADDRESS); // transmit to device #4
-    Wire.write(addr);
-    Wire.write(data);
-    Wire.endTransmission();    // stop transmitting
+    //WITH_LOCK(Wire) { // added by Ryan
+        Wire.beginTransmission(RGB_ADDRESS); // transmit to device #4
+        Wire.write(addr);
+        Wire.write(data);
+        Wire.endTransmission();    // stop transmitting
+    //}
 }
 
 void Waveshare_LCD1602_RGB::setRGB(uint8_t r, uint8_t g, uint8_t b)
