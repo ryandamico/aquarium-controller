@@ -354,7 +354,7 @@ class CO2BubbleSensor_v3 {
             
             // endure that bubble rate isn't too low
             if (co2Running) {
-                if (millis() - _co2StartTime > 2*60*1000 && _bubbleCount == 0 ) {
+                if (millis() - _co2StartTime > 10*60*1000 && _bubbleCount == 0 ) {
                     _currentFault = Faults::BPS_TOO_LOW;
                     stopCO2();
                     static PushNotification notification_BPS_TOO_LOW_1(5min);

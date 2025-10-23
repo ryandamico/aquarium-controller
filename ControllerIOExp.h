@@ -1,4 +1,4 @@
-class ControllerIOExp : public IOExpansionBoard {
+/*class ControllerIOExp : public IOExpansionBoard {
 
     #define ACTIVE_LOW LOW
     #define INACTIVE_HIGH HIGH
@@ -37,4 +37,4 @@ class ControllerIOExp : public IOExpansionBoard {
             UNUSED_OUTPUT = 11 //B3 -- unused two-pin output header
         };
         
-};
+};*/

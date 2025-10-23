@@ -76,6 +76,7 @@
 #include <DS18B20.h>
 #include <Adafruit_MCP23017.h>
 #include "RelayModule.h"
+#include "ControllerIOExp.h"
 
 
 // comment out line below to enable piezo buzzer
@@ -365,6 +366,7 @@ retained bool autoTopoffEnabled = true;
 retained long dosingPump2LastRunEpoch_Retained = -1;
 retained long dosingPump3LastRunEpoch_Retained = -1;
 retained bool uptimeExceededOneMinute = false; // used to enter into safe mode if we reset/hang/etc before one minute of looping
+retained long fullWaterChangeLastRunEpoc_Retained = -1;
 /* ---------------------------------------- */
 
 // note: now making this a non-retained variable starting off true, which is the value we expect nominally
@@ -604,11 +606,14 @@ enum WaterChangeAutomationLevel {
 
 enum WaterChangeMode {
     FULL_WATER_CHANGE = 0,
-    SKIP_MIXING_TANK_FILL
+    SKIP_MIXING_TANK_FILL, // used for ??
+    SIPHON_CLEANING_MODE
+    //~~~~SKIP_DRAINING_AQUARIUM // used for siphon cleaning mode
     // note: if adding any other changes, make sure to re-check how other enums are being tested for equality or inequality
 };
 
 bool runFullWaterChangeAutomatic(WaterChangeMode, WaterChangeAutomationLevel);
+bool runFullWaterChangeAutomatic(WaterChangeMode, WaterChangeAutomationLevel, bool);
 bool mixingStation_drainAquarium(int, bool);
 
 volatile bool tmp_enable_petHWWatchdog = true;
@@ -654,7 +659,7 @@ SimpleScheduler dosingPump1(
 void dosingPump1Task_handler() {
     //bool startDosingPumpSafe(int dosingPumpNum, float doseMilliliters, long &lastRunEpoch_retained)
     startDosingPumpSafe(1, DOSING_PUMP_1_MILLILITERS, dosingPump1LastRunEpoch_Retained);
-    Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"[Aquarium controller] Dosing pump #1 activated for %.1f mL""\" }", DOSING_PUMP_1_MILLILITERS), PRIVATE);
+    //Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"[Aquarium controller] Dosing pump #1 activated for %.1f mL""\" }", DOSING_PUMP_1_MILLILITERS), PRIVATE);
 }
 
 SimpleScheduler dosingPump2(
@@ -669,27 +674,28 @@ SimpleScheduler dosingPump2(
 );
 void dosingPump2Task_handler() {
 
-    Particle.publish("push-notification", "{ \"type\": \"send-message-generic\", \"message\": \"[Aquarium controller] About to run dosing pump #2...""\" }", PRIVATE);
-    lcdDisplayWaitPressButton("Ready to dose...", "", 40);
+    //Particle.publish("push-notification", "{ \"type\": \"send-message-generic\", \"message\": \"[Aquarium controller] About to run dosing pump #2...""\" }", PRIVATE);
+    //lcdDisplayWaitPressButton("Ready to dose...", "", 40);
 
     //bool startDosingPumpSafe(int dosingPumpNum, float doseMilliliters, long &lastRunEpoch_retained)
     startDosingPumpSafe(2, DOSING_PUMP_2_MILLILITERS, dosingPump2LastRunEpoch_Retained);
-    Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"[Aquarium controller] Dosing pump #2 activated for %.1f mL""\" }", DOSING_PUMP_2_MILLILITERS), PRIVATE);
+    //Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"[Aquarium controller] Dosing pump #2 activated for %.1f mL""\" }", DOSING_PUMP_2_MILLILITERS), PRIVATE);
 }
 
 SimpleScheduler automaticWaterChange(
     "Automated water change", // task name
-    9, //17, // start hour
+    17, // start hour
     15, //0,  // start minute
     24,  // repeat interval (hours)
-    SimpleScheduler::DayOfWeek::SATURDAY, // day of week to limit to
+    SimpleScheduler::DayOfWeek::SUNDAY, // day of week to limit to
     automaticWaterChange_handler, // function to execute 
     8, // EEPROM ID
     true // enabled
 );
+
 void automaticWaterChange_handler() {
     //automaticWaterChange.resetLastRunEEPROM();
-    runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::FULLY_AUTOMATED); // will send push notification
+    runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::FULLY_AUTOMATED, true); // will send push notification
     
     //PushNotification::send("Testing automatic water change scheduler handler. Resetting lastRun EEPROM value.");
     // TODO: skip if water changed too recently?
@@ -858,6 +864,8 @@ bool mixingStationConnected;
 uint8_t warningBits = 0x00;
 
 Timer dstTimer(1000*60*60, SharedUtilities::checkAndAdjustDST);
+
+volatile bool setting__disableFlowRateSensor = false;
 
 void setup() {
     
@@ -1218,6 +1226,7 @@ void setup() {
     
     //Particle.variable("lastPerfMs", tmp_lastPerfElapsedTimeMs);
     Particle.variable("tmp_numChecksFailed", tmp_numChecksFailed);
+    Particle.function("bypassFlowSensorTgl", cloud_bypassFlowSensorTgl);
     Particle.function("toggleTopoff", cloud_toggleTopoff);
     Particle.function("getTempIn", cloud_getTempIn);
     Particle.function("forceTopoffCheck", cloud_addWaterManually);
@@ -1228,7 +1237,7 @@ void setup() {
     Particle.function("toggleCO2", cloud_toggleCO2);
     //Particle.function("IOTest1", cloud_ioTest1);
     Particle.function("sensorTestToggle", cloud_sensorTestToggle);
-    Particle.function("outputTestMenu", cloud_outputTestToggle);
+    Particle.function("dosingPump2Ctrl", cloud_dosingPump2Ctrl);
     Particle.function("drainReserv", cloud_drainReserv);
     Particle.function("dosePrime", cloud_dosePrime);
     Particle.function("fillMixingTank_PWD", cloud_fillMixingTank_pwd);
@@ -1802,7 +1811,11 @@ void updateLCD(float tempInF, float tempOutF, float flowRate, ControllerModes co
         lcd.send_string(String(tempInF).substring(0, 5) + (char)223 + "  "); //.concat("      "));
     
         lcd.setCursor(8,0);
-        lcd.send_string(String(flowRate).substring(0, 4) + " GPH  ");
+        if (setting__disableFlowRateSensor) {
+            lcd.send_string("*N/A GPH  ");
+        } else {
+            lcd.send_string(String(flowRate).substring(0, 4) + " GPH  ");
+        }
 
     } else {
         lcd.setCursor(0,0);
@@ -2013,7 +2026,7 @@ float flag__cloud_dosePrime_optOverrideTimeSeconds = 0;
 int flag__cloud_fullWaterChange_pwd = 0;
 bool flag__cloud_mainPumpTest_pwd = false;
 bool flag__cloud_sensorTestToggle = false;
-bool flag__cloud_outputTestToggle = false;
+bool flag__cloud_dosingPump2Ctrl = false;
 bool flag__cloud_drainTank_pwd = false;
 bool flag__cloud_tempTest = false;
 
@@ -2064,21 +2077,25 @@ void canisterCleaningMode() {
     //lcd.display("Start cleaning", "filter...", 2);
     //lcd.display("while mix tank", "starts filling.", 1);
 
+    bool skipFilling = true;
     itemIndex = displayStrings(
         2,
         "Pre-fill mixing tank",
-        "Skip"
+        "Skip filling"
     );
 
     bool error = false;
     if (itemIndex == 0) {
-
+        skipFilling = false;
         bool tryAgain = false;
         do {
             bool success = false;
             bool cancelledViaButtonPress = false;
             unsigned long debug_numInvalidReadings = 0;
             
+            // drain reservoir
+            mixingStation.drainReservoir();
+
             // ******TODO: dose prime w/ right gallon value****** --> consider adding retry option
             success = mixingStation.dosePrime(GALLONS);
             if (!success) {
@@ -2089,15 +2106,21 @@ void canisterCleaningMode() {
                     ">Dosing error. TODO. Press."
                 );*/          
             } else {
-                // drain reservoir
-                mixingStation.drainReservoir();
-        
-                // dose prime
                 success = mixingStation.dispenseWater(GALLONS, cancelledViaButtonPress, debug_numInvalidReadings); //bool dispenseWater(float totalMixedGallons, bool &cancelledViaButtonPress, unsigned long &debug_numInvalidReadings) {
             }
             
             if (!success || cancelledViaButtonPress || debug_numInvalidReadings > 0) {
                 errorBeep();
+                
+                // debug
+                if (cancelledViaButtonPress || debug_numInvalidReadings > 0) {
+                    errorBeep();
+                    displayStrings(
+                        1,
+                        String::format("Debug: Error: %d, %d", cancelledViaButtonPress, debug_numInvalidReadings)
+                    );
+                }
+                
                 itemIndex = displayStrings(
                     2,
                     "Error. Try again?",
@@ -2109,7 +2132,10 @@ void canisterCleaningMode() {
                     tryAgain = false;
                     error = true;
                 }
+            } else if (success) {
+                tryAgain = false;
             }
+            
         } while (tryAgain);
     }
 
@@ -2136,16 +2162,23 @@ void canisterCleaningMode() {
     delay(7*1000);
     
     if (!error) {
-        itemIndex = displayStrings(
-            2,
-            "Pump water to aquarium",
-            "Skip"
-        );
-        if (itemIndex == 0) {
-            bool success = mixingStation.pumpWaterToAquarium(123, isLiquidDetectedTop);
-            if (!success) {
-                errorBeep();
-                PushNotification::send(String::format("Warning: Error pumping water to aquarium during canister filter change"));
+        if (skipFilling) {
+            displayStrings(
+                1,
+                "Open cutoff valve & resume"
+            );
+        } else {
+            itemIndex = displayStrings(
+                2,
+                "Pump water to aquarium",
+                "Skip"
+            );
+            if (itemIndex == 0) {
+                bool success = mixingStation.pumpWaterToAquarium(123, isLiquidDetectedTop);
+                if (!success) {
+                    errorBeep();
+                    PushNotification::send(String::format("Warning: Error pumping water to aquarium during canister filter change"));
+                }
             }
         }
     }
@@ -2313,33 +2346,76 @@ void loop() {
         }
 
         int itemIndex = displayStrings(
-            6,
+            10,
           //"                                " // 32 chars
+            "Gravel siphon  cleaning mode",
             "Canister filter cleaning mode",
             "Full water change (full auto)",
             "Full water change (semi-auto)",
             "Full water change (manual)",
+            "Toggle flowrate sensor bypass",
             "Set flag__cloud_tempTest", 
+            "Run flow calibration (tap)",
+            "Run flow calibration (rodi)",
             "Exit"
         );
         
         // TODO: refactor and consider switching to state machine approach
         switch (itemIndex) {
             case 0: 
-                canisterCleaningMode();
+                siphonCleaningMode();
                 break;
             case 1: 
-                runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::FULLY_AUTOMATED);
+                canisterCleaningMode();
                 break;
             case 2: 
-                runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::SEMI_AUTOMATED);
+                runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::FULLY_AUTOMATED);
                 break;
             case 3: 
+                runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::SEMI_AUTOMATED);
+                break;
+            case 4: 
                 runFullWaterChangeAutomatic(WaterChangeMode::FULL_WATER_CHANGE, WaterChangeAutomationLevel::NOT_AUTOMATED);
                 break;
-            case 4:
+            case 5:
+                setting__disableFlowRateSensor = !setting__disableFlowRateSensor;
+                lcd.display("Flowrate sensor:", setting__disableFlowRateSensor ? "Disabled" : "Enabled", 3);
+                timeSinceLcdUpdate = millis() - LCD_UPDATE_TIME_MS - 1; // force LCD refresh next cycle
+                break;
+            case 6:
                 flag__cloud_tempTest = true;
                 break;
+            case 7: {
+                    // TODO: clean up!
+                    bool success = mixingStation.dispenseWaterCalibrationMode(true); // bool useTapInsteadOfRodi
+                    if (!success) {
+                        success = mixingStation.dispenseWaterCalibrationMode(true); // bool useTapInsteadOfRodi                    
+                    } if (!success) {
+                        PushNotification::send("Debug: Tap water caliberation failed twice");
+                        break;
+                    }
+                    break;
+                }
+            case 8: {
+                    // TODO: clean up!
+                    /*
+                    bool success = mixingStation.dispenseWaterCalibrationMode(true); // bool useTapInsteadOfRodi
+                    if (!success) {
+                        success = mixingStation.dispenseWaterCalibrationMode(true); // bool useTapInsteadOfRodi                    
+                    } if (!success) {
+                        PushNotification::send("Debug: First caliberation failed twice. Skipping second calibration.");
+                        break;
+                    }*/
+                    
+                    bool success = mixingStation.dispenseWaterCalibrationMode(false);
+                    if (!success) {
+                        success = mixingStation.dispenseWaterCalibrationMode(false); // bool useTapInsteadOfRodi                    
+                    } if (!success) {
+                        PushNotification::send("Debug: Second calibration failed twice");
+                        break;
+                    }
+                    break;
+                }
             default:
                 return;
         }
@@ -2451,7 +2527,7 @@ void loop() {
                 flag__flowRateTooLow = false;
                 lcd.setRGB(LCD_RGB_NORMAL);
                 lcd.display("Flow rate", "restored", 1);
-                PushNotification::send(String::format("Update: Flow rate has been restored: %.2f GPH", flowRate2), true);
+                PushNotification::send(String::format("Update: Flow rate has been restored: %.2f GPH", flowRate2), false); //~~~~~true); // stopping false critical alarms for now
                 lcd.clear();
             } else {
                 lcd.display(String::format("Too low: %.2f GPH", flowRate2), "", 1);
@@ -2463,12 +2539,12 @@ void loop() {
             if (flowRate < 20) {
                 // wait and check again to be safe
                 lcd.display("Checking flow", "rate...", 0);
-                delay(1000);
+delay(1000); // TODO: consider makig this much longer to reduce false positive alerts
                 float flowRate2 = flowRateSensor.readFlowRateGPH(true);
-                if (flowRate2 < 20) {
+                if (flowRate2 < 20 && !setting__disableFlowRateSensor) {
                     flag__flowRateTooLow = true;
                     static PushNotification notification_flowRateTooAfterEnablingCanisterFilter(60min);
-                    notification_flowRateTooAfterEnablingCanisterFilter.sendWithCooldown(String::format("WARNING: Flow rate too low: %.2f GPH.", flowRate2), true);
+                    notification_flowRateTooAfterEnablingCanisterFilter.sendWithCooldown(String::format("WARNING: Flow rate too low: %.2f GPH.", flowRate2), false); //~~~~~true); // stopping false critical alarms for now
                     lcd.setRGB(LCD_RGB_WARNING);
                     errorBeep();
                     lcd.display(String::format("Too low: %.2f GPH", flowRate2), "", 1);
@@ -2700,6 +2776,8 @@ return;
     
     if (flag__cloud_tempTest) {
         flag__cloud_tempTest = false;
+        automaticWaterChange.resetLastRunEEPROM();
+        
         
         /*
         float rodiWaterGallons = (TANK_WATER_CHANGE_GALLONS * RODI_TO_TAP_TARGET_RATIO) / (RODI_TO_TAP_TARGET_RATIO + 1);
@@ -2711,7 +2789,7 @@ return;
         mixingStation.dispenseWater(0.0, rodiTargetGallons, cancelledViaButtonPress, debug_numInvalidReadings); //float tapWaterGallons, float rodiWaterGallons, bool &cancelledViaButtonPress, unsigned long &debug_numInvalidReadings) {
         */
 
-        mixingStation.dispenseWaterCalibrationMode(true);
+///        mixingStation.dispenseWaterCalibrationMode(true);
         //mixingStation.dispenseWaterCalibrationMode(false);
         
         //mixingStation.dispenseWaterAndCountPulses();
@@ -2821,8 +2899,8 @@ return;
         mixingStation_drainAquarium(123, false); // important: set leaveFilterAndHeaterOff to false
     }
     
-    if (flag__cloud_outputTestToggle) {
-        flag__cloud_outputTestToggle = false;
+    if (flag__cloud_dosingPump2Ctrl) {
+        flag__cloud_dosingPump2Ctrl = false;
         
         
         // temp -- TODO delete
@@ -2904,7 +2982,7 @@ return;
         
         
         /*
-        flag__cloud_outputTestToggle = false;
+        flag__cloud_dosingPump2Ctrl = false;
         lcd.display("Output test", "", 1);
 
         lcd.setCursor(0,1);
@@ -3259,10 +3337,12 @@ if (isLiquidDetectedTop()) {
         
         // safety in case timed task fails
         if (!CO2BubbleSensor_v3::isActiveTimeOfDay() && Time.minute() > 5 && co2BubbleSensor.isCO2Started()) { // new: added 5 minute grace period
-            co2BubbleSensor.stopCO2();
-            errorBeep();
-            static PushNotification notification_co2BackupAlert(10min);
-            notification_co2BackupAlert.sendWithCooldown("WARNING: C02 stopped via backup. You should never see this!", true);
+            if (mixingStation.isEnabled()) { //new. eg not via mixingStation.disable(), emergencyIODisable()
+                co2BubbleSensor.stopCO2();
+                errorBeep();
+                static PushNotification notification_co2BackupAlert(10min); 
+                notification_co2BackupAlert.sendWithCooldown("WARNING: C02 stopped via backup. You should never see this!", true);
+            }
         }
         /*
         if (Time.isValid()) {
@@ -3397,6 +3477,11 @@ void doTempTempChecks(float &tempInF, float &tempOutF, float &flowRate) {
     int reading = analogRead(PIN__LIQUID_LEVEL_SENSOR_CAPACITIVE);
     return (reading > 1000 && reading < 2900);
 }*/
+
+int cloud_bypassFlowSensorTgl(String extra) {
+    setting__disableFlowRateSensor = !setting__disableFlowRateSensor;
+    return setting__disableFlowRateSensor;
+}
 
 int cloud_toggleTopoff(String extra) {
     autoTopoffEnabled = !autoTopoffEnabled;
@@ -3553,9 +3638,9 @@ int cloud_sensorTestToggle(String extra) {
     return flag__cloud_sensorTestToggle;
 }
 
-int cloud_outputTestToggle(String extra) {
-    flag__cloud_outputTestToggle = !flag__cloud_outputTestToggle;
-    return flag__cloud_outputTestToggle;
+int cloud_dosingPump2Ctrl(String extra) {
+    flag__cloud_dosingPump2Ctrl = !flag__cloud_dosingPump2Ctrl;
+    return flag__cloud_dosingPump2Ctrl;
 }
 
 int cloud_drainReserv(String extra) {
@@ -4142,63 +4227,75 @@ bool disableFilterAndHeatWithAlert() {
     // turn off canister filter and verify that flow rate is zero
     lcd.display("Canister filter", "shutting off", 1);
     relayModule.setCanisterFilter(false);
-    lcd.display("Verifying flow", "rate...", 0);
-    // leave plenty of time for pump to spin up, esp in case of air bubble
-    for (int i=3; i>=0; i--) {
-        lcd.setCursor(15,1);
-        lcd.send_string(String(i));
-        delay(1000);
-    }    
-    float flowRate = flowRateSensor.readFlowRateGPH(true);
-    if (flowRate > 0.01) {
-        relayModule.setCanisterFilter(true);
-        lcd.display("Error: Flow rate", "too high", 0);
-
-        static PushNotification notification_disableFilterAndHeatWithAlert(60min);
-        notification_disableFilterAndHeatWithAlert.sendWithCooldown(String::format("ERROR: Flow rate was not zero after shutting off canister filter (was %.2f GPH). Turning filter back on.", flowRate));
-        delay(1000);
-        lcd.clear();
-        return false; // indicates that canister filter is left turned back on, and heat is unchanged
+    
+    if (setting__disableFlowRateSensor) {
+        lcd.display("Bypassing flow", "rate check..", 3);
     } else {
-        relayModule.setHeater(false);
-        lcd.display("... success.", "Heat turned off.", 2);
-        return true; // indicates that canister filter and heat are both turned off
-    }    
+        lcd.display("Verifying flow", "rate...", 0);
+        // leave plenty of time for pump to spin up, esp in case of air bubble
+        for (int i=3; i>=0; i--) {
+            lcd.setCursor(15,1);
+            lcd.send_string(String(i));
+            delay(1000);
+        }    
+        float flowRate = flowRateSensor.readFlowRateGPH(true);
+        if (flowRate > 0.01) {
+            relayModule.setCanisterFilter(true);
+            lcd.display("Error: Flow rate", "too high", 0);
+    
+            static PushNotification notification_disableFilterAndHeatWithAlert(60min);
+            notification_disableFilterAndHeatWithAlert.sendWithCooldown(String::format("ERROR: Flow rate was not zero after shutting off canister filter (was %.2f GPH). Turning filter back on.", flowRate));
+            delay(1000);
+            lcd.clear();
+            return false; // indicates that canister filter is left turned back on, and heat is unchanged
+        } 
+    }
+    
+    relayModule.setHeater(false);
+    lcd.display("... success.", "Heat turned off.", 2);
+    return true; // indicates that canister filter and heat are both turned off
 }
 
 bool enableFilterAndHeatWithAlert() {
     // turn on canister filter and verify that flow rate is > zero
     lcd.display("Canister filter", "turning on", 1);
-    lcd.display("Verifying flow", "rate...", 0);
-    relayModule.setCanisterFilter(true);
-    // leave plenty of time for pump to spin up, esp in case of air bubble
-    for (int i=5; i>=0; i--) {
-        lcd.setCursor(15,1);
-        lcd.send_string(String(i));
-        delay(1000);
-    }
 
-    // new: try several times if we don't get an accurate reading right away
-    float flowRate;
-    for (int i=0; i<3; i++) {
-        flowRate = flowRateSensor.readFlowRateGPH(true);
-        if (flowRate > 0.05) {
-            relayModule.setHeater(true);
-            lcd.display("... success.", "Heat turned on.", 2);
-            return true; // indicates that canister filter and heat are both turned on
+    if (setting__disableFlowRateSensor) {
+        lcd.display("Bypassing flow", "rate check..", 3);
+        relayModule.setCanisterFilter(true);
+        relayModule.setHeater(true);
+        return true; // indicates that canister filter and heat are both turned on
+    } else {
+        lcd.display("Verifying flow", "rate...", 0);
+        relayModule.setCanisterFilter(true);
+        // leave plenty of time for pump to spin up, esp in case of air bubble
+        for (int i=5; i>=0; i--) {
+            lcd.setCursor(15,1);
+            lcd.send_string(String(i));
+            delay(1000);
         }
+    
+        // new: try several times if we don't get an accurate reading right away
+        float flowRate;
+        for (int i=0; i<3; i++) {
+            flowRate = flowRateSensor.readFlowRateGPH(true);
+            if (flowRate > 0.05) {
+                relayModule.setHeater(true);
+                lcd.display("... success.", "Heat turned on.", 2);
+                return true; // indicates that canister filter and heat are both turned on
+            }
+        }
+    
+        // if we get here, the flow rate never picked up the way we expected it to    
+        flag__flowRateTooLowAfterEnablingCanisterFilter = true;
+        relayModule.setCanisterFilter(false);
+        lcd.display("Error: Flow rate", "too low", 0);
+        static PushNotification notification_enableFilterAndHeatWithAlert(60min);
+        notification_enableFilterAndHeatWithAlert.sendWithCooldown(String::format("*ERROR*: Flow rate was too low (%.2f GPH) after powering back on. Leaving filter (and heat) off. Check manually ASAP.", flowRate), true);
+        delay(1000);
+        lcd.clear();
+        return false; // indicates that canister filter is left off, and heat is unchanged
     }
-
-    // if we get here, the flow rate never picked up the way we expected it to    
-    flag__flowRateTooLowAfterEnablingCanisterFilter = true;
-    relayModule.setCanisterFilter(false);
-    lcd.display("Error: Flow rate", "too low", 0);
-    static PushNotification notification_enableFilterAndHeatWithAlert(60min);
-    notification_enableFilterAndHeatWithAlert.sendWithCooldown(String::format("*ERROR*: Flow rate was too low (%.2f GPH) after powering back on. Leaving filter (and heat) off. Check manually ASAP.", flowRate), true);
-    delay(1000);
-    lcd.clear();
-    return false; // indicates that canister filter is left off, and heat is unchanged
-
 }
 
 // TODO: decide on refactoring
@@ -4435,7 +4532,7 @@ bool runFullWaterChangeAutomatic_internalOnly(WaterChangeMode waterChangeMode, W
     
     // ensure flow rate is > 10 GPH
     float flowRate = flowRateSensor.readFlowRateGPH(true);
-    if (flowRate <= 10) {
+    if (flowRate <= 10 && !setting__disableFlowRateSensor) {
         SET_MIXING_STATION_STR(String::format("Expected flow rate to be > 10 GPH. Was %.2f GPH.", flowRate));
         return false;
     }
@@ -4481,7 +4578,7 @@ bool runFullWaterChangeAutomatic_internalOnly(WaterChangeMode waterChangeMode, W
             lcd.display("(Note: Water", "in mix tank)", 3);
         } 
         
-        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED) {
+        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED || automationLevel == WaterChangeAutomationLevel::SEMI_AUTOMATED) {
             lcdDisplayWaitPressButton("Draining mixing", "tank...", 3);
         } else if (automationLevel == WaterChangeAutomationLevel::NOT_AUTOMATED) {
             lcdDisplayWaitPressButton("Drain mixing", "tank?");
@@ -4498,7 +4595,7 @@ bool runFullWaterChangeAutomatic_internalOnly(WaterChangeMode waterChangeMode, W
         
         /** add Seachem Prime **/
         
-        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED) {
+        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED || automationLevel == WaterChangeAutomationLevel::SEMI_AUTOMATED) {
             lcdDisplayWaitPressButton("Dosing with", "Prime...", 3);
         } else if (automationLevel == WaterChangeAutomationLevel::NOT_AUTOMATED) {
             lcdDisplayWaitPressButton("Dose with Prime?");
@@ -4507,11 +4604,17 @@ bool runFullWaterChangeAutomatic_internalOnly(WaterChangeMode waterChangeMode, W
         int numTries = 1;
         Particle.publish("Water change", "Dosing with Prime...");
         success = mixingStation.dosePrime();
-        if (!success) {
+        if (!success) { 
             numTries++;
             lcd.display("Dosing failed", "trying again...", 2);
             Particle.publish("Water change", "Dosing failed. Trying again...");
             success = mixingStation.dosePrime();
+            if (!success) { // TODO: refactor
+                numTries++;
+                lcd.display("Dosing failed", "trying again...", 2);
+                Particle.publish("Water change", "Dosing failed. Trying again...");
+                success = mixingStation.dosePrime();
+            }
             if (!success) {
                 SET_MIXING_STATION_STR("Seachem Prime dosing failed");
                 return false;
@@ -4522,7 +4625,7 @@ bool runFullWaterChangeAutomatic_internalOnly(WaterChangeMode waterChangeMode, W
         
         /** fill mixing tank **/
         
-        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED) {
+        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED || automationLevel == WaterChangeAutomationLevel::SEMI_AUTOMATED) {
             lcdDisplayWaitPressButton("Filling mixing", "tank...", 3);
         } else {
             lcdDisplayWaitPressButton("Fill mixing", "tank?");
@@ -4546,47 +4649,61 @@ bool runFullWaterChangeAutomatic_internalOnly(WaterChangeMode waterChangeMode, W
         
     }
     
-    /** drain aquarium **/
-
-    if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED) {
-        lcdDisplayWaitPressButton("Draining", "aquarium...", 3);
+    if (waterChangeMode == WaterChangeMode::SIPHON_CLEANING_MODE) {
+        // TODO: TANK_WATER_CHANGE_GALLONS -->         #define TANK_WATER_CHANGE_GALLONS               4.25 //5.25 // Note: Current tank is approx 11.5" x 23", with an average depth of 3.5" between liquid level sensors. That equals 4 gallons, so we'll plan for 5.25 to be safe
+        Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"%s""\" }", "Aquarium is ready for siphoning."), PRIVATE);
+        lcdDisplayWaitPressButton("Start siphoning;", "press to fill");
     } else {
-        Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"%s""\" }", "Mixing tank filling complete. Ready to drain aquarium."), PRIVATE);
-        lcdDisplayWaitPressButton("Drain aquarium?");
-    }
-    Particle.publish("Water change", "Draining aquarium (and checking/disabling canister filter and heater)...");
-    delay(500);
+        // new
+        PushNotification::send("Aquarium is ready for siphoning. Press to pause within 2 minutes.");
+        bool buttonPressed;
+        buttonPressed = lcdDisplayWaitPressButton("Pause to", "siphon gravel?", 120);
+        if (buttonPressed) {
+            beepBuzzer(1);
+            lcdDisplayWaitPressButton("Press to finish", "draining tank", -1);
+        }
 
-    // =====================================================================================================================================
-    // NOTE: Be careful ensuring that the state of electric ball valves as well as the canister filter and heater are maintained below
-    // =====================================================================================================================================
-
-    success = mixingStation_drainAquarium(123, true); // NOTE: we add flag to leave canister filter and heat off so we can move seamlessly to the next stage afterwards
-    if (!success) {
-        PushNotification::send("Warning: Aquarium partial drain returned fault flag, but will still continuing with refill process.");
-        Particle.publish("Water change", "Warning: Aquarium partial drain returned fault flag, but will still continuing with refill process.");
-        delay(1000);
-        //SET_MIXING_STATION_STR("Draining aquarium failed");
-        //return false; // note: no longer want to do this in case we time out -- we should continue refilling
-    }    
-    
-    // TODO: shut off pump (and heater), set electric ball valves, (if !limitedTestMode) and wait a moment for flow to settle, etc.
-    
-    // ensure flow rate is zero
-    
-    // TODO: do we need to call co2BubbleSensor.stopInterrupts() too? // required to avoid system deadlock of some kind when rampPump() is called
-
-    /** wait if user wants to clean the tank **/
-    
-    // let user press button to hold while they clean the tank
-    PushNotification::send("Aquarium is ready for cleaning before filling back up. Press to pause within 2 minutes.");
-    bool buttonPressed = lcdDisplayWaitPressButton("Pause to clean", "tank?", 120);
-    if (buttonPressed) {
-        beepBuzzer(1);
+        /** drain aquarium **/
+        if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED) {
+            lcdDisplayWaitPressButton("Draining", "aquarium...", 3);
+        } else {
+            Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"%s""\" }", "Mixing tank filling complete. Ready to drain aquarium."), PRIVATE);
+            lcdDisplayWaitPressButton("Drain aquarium?");
+        }
+        Particle.publish("Water change", "Draining aquarium (and checking/disabling canister filter and heater)...");
         delay(500);
-        lcdDisplayWaitPressButton("Press to fill", "tank", -1);
+    
+        // =====================================================================================================================================
+        // NOTE: Be careful ensuring that the state of electric ball valves as well as the canister filter and heater are maintained below
+        // =====================================================================================================================================
+    
+        success = mixingStation_drainAquarium(123, true); // NOTE: we add flag to leave canister filter and heat off so we can move seamlessly to the next stage afterwards
+        if (!success) {
+            PushNotification::send("Warning: Aquarium partial drain returned fault flag, but will still continuing with refill process.");
+            Particle.publish("Water change", "Warning: Aquarium partial drain returned fault flag, but will still continuing with refill process.");
+            delay(1000);
+            //SET_MIXING_STATION_STR("Draining aquarium failed");
+            //return false; // note: no longer want to do this in case we time out -- we should continue refilling
+        }    
+        
+        // TODO: shut off pump (and heater), set electric ball valves, (if !limitedTestMode) and wait a moment for flow to settle, etc.
+        
+        // ensure flow rate is zero
+        
+        // TODO: do we need to call co2BubbleSensor.stopInterrupts() too? // required to avoid system deadlock of some kind when rampPump() is called
+    
+        /** wait if user wants to clean the tank **/
+        
+        // let user press button to hold while they clean the tank
+        PushNotification::send("Aquarium is ready for cleaning before filling back up. Press to pause within 2 minutes.");
+        buttonPressed = lcdDisplayWaitPressButton("Pause to clean", "tank?", 120);
+        if (buttonPressed) {
+            beepBuzzer(1);
+            delay(500);
+            lcdDisplayWaitPressButton("Press to fill", "tank", -1);
+        }
     }
-
+    
     /** pump water up **/
 
     if (automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED) {
@@ -4671,7 +4788,7 @@ bool old__runFullWaterChangeAutomatic_internalOnly(bool requireButtonPresses=tru
     
     // ensure flow rate is > 1 before going further
     float flowRate = flowRateSensor.readFlowRateGPH(true);
-    if (flowRate <= 1) {
+    if (flowRate <= 1 && !setting__disableFlowRateSensor) {
         SET_MIXING_STATION_STR("Expected flow rate to be non-zero. Was " + String(flowRate));
         return false;
     }
@@ -4725,7 +4842,7 @@ bool old__runFullWaterChangeAutomatic_internalOnly(bool requireButtonPresses=tru
         
         bool cancelledViaButtonPress = false;
         unsigned long debug_numInvalidReadings = 0;
-        success = mixingStation.dispenseWater(TANK_WATER_CHANGE_GALLONS, cancelledViaButtonPress, debug_numInvalidReadings);
+        success = mixingStation.dispenseWater(TANK_WATER_CHANGE_SIPHON_GALLONS, cancelledViaButtonPress, debug_numInvalidReadings);
 
         if (success && !cancelledViaButtonPress && debug_numInvalidReadings == 0) {
             //PushNotification::send("Finished filling mixing tank with RODI water"); // message is sent below
@@ -4894,12 +5011,50 @@ PushNotification::send(String::format("*ERROR* Flow rate not detected after turn
 }
 */
 
+void siphonCleaningMode() {
+    int itemIndex = displayStrings(
+        2,
+        "Start now",
+        "Exit"
+    );
+    
+    if (itemIndex == 1) {
+        return;
+    } else if (itemIndex == 0) {
+        // note: use GET_MIXING_STATION_CSTR() to get error string if success gets set to false
+        bool success = runFullWaterChangeAutomatic(WaterChangeMode::SIPHON_CLEANING_MODE, WaterChangeAutomationLevel::SEMI_AUTOMATED); //FULLY_AUTOMATED);
+        if (success) {
+            lcd.display("Siphon mode", "Complete!!", 3);
+            arpeggioBeep();
+            delay(250);
+        } else {
+            lcd.display("Error:", GET_MIXING_STATION_CSTR(), 0, true);
+            arpeggioBeep(true);
+            errorBeep();
+            PushNotification::send(String::format("Error completing siphon mode: %s", GET_MIXING_STATION_CSTR()));
+            delay(250);
+        }
+    }
+}
+
 bool runFullWaterChangeAutomatic(WaterChangeMode waterChangeMode, WaterChangeAutomationLevel automationLevel) {
+    return runFullWaterChangeAutomatic(waterChangeMode, automationLevel, false);
+}
+
+bool runFullWaterChangeAutomatic(WaterChangeMode waterChangeMode, WaterChangeAutomationLevel automationLevel, bool runFromScheduler=false) {
     // was: (bool requireButtonPresses=true, bool minimumPressesOnly=false, bool limitedTestMode=false, bool debug_skipFillingSteps=false) {
     //    if (automationLevel == WaterChangeAutomationLevel::NOT_AUTOMATED) {
     //    if (waterChangeMode != WaterChangeMode::SKIP_MIXING_TANK_FILL) {
 
-
+    // new: make sure we don't run via scheduler right after a manual run
+    if (runFromScheduler && fullWaterChangeLastRunEpoc_Retained > 0 && Time.isValid()) {
+        float hoursSinceLastWaterChange = (Time.now() - fullWaterChangeLastRunEpoc_Retained)/60/60;
+        if (hoursSinceLastWaterChange < 24*3) {
+            PushNotification::send("Automatic water change already ran recently; skipping. hoursSinceLastWaterChange: " + String(hoursSinceLastWaterChange));
+            return false;
+        }
+    }
+    
     // TODO: major refactor
     
     arpeggioBeep(); // testing
@@ -4969,15 +5124,18 @@ bool runFullWaterChangeAutomatic(WaterChangeMode waterChangeMode, WaterChangeAut
     
     /** report results **/
     
+    fullWaterChangeLastRunEpoc_Retained = Time.now();
+    
     lcd.clear();
     if (success) {
         lcd.display("Water change", "successful!", 0);
-        arpeggioBeep(true);
+        arpeggioBeep();
         Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"%s""\" }", "Successfully completed aquarium water change"), PRIVATE);
         Particle.publish("Water change", "Water change successful!");
         delay(250);
     } else {
         lcd.display("Error:", GET_MIXING_STATION_CSTR(), 0, true);
+        arpeggioBeep(true);
         errorBeep();
         PushNotification::send(String::format("Error completing aquarium water change: %s", GET_MIXING_STATION_CSTR()), automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED);
         Particle.publish("Water change", "Error running water change -- see logs");
@@ -5005,9 +5163,10 @@ bool runFullWaterChangeAutomatic(WaterChangeMode waterChangeMode, WaterChangeAut
         success = mixingStation.drainReservoir(sensorDetectionPercent);
         if (success) {
             lcd.display("Success!", "");
-            arpeggioBeep(true);
+            arpeggioBeep();
             Particle.publish("push-notification", String::format("{ \"type\": \"send-message-generic\", \"message\": \"%s""\" }", "Successfully drained mixing tank post-water change"), PRIVATE);
         } else {
+            arpeggioBeep(true);
             errorBeep();
             //SET_MIXING_STATION_STR("Draining mixing tank failed");
             PushNotification::send("Error draining mixing tank", automationLevel == WaterChangeAutomationLevel::FULLY_AUTOMATED);
@@ -5024,14 +5183,14 @@ bool runFullWaterChangeAutomatic(WaterChangeMode waterChangeMode, WaterChangeAut
     return success;
 }
 
-int displayStrings(int numStrings, const char* firstString, ...) { // generated using ChatGPT 4 (!)
+int displayStrings(int numStrings, const char* firstString, ...) {
 	va_list args;
 	va_start(args, firstString);
 
 	const char* strings[numStrings];
 	strings[0] = firstString;
 
-	for (int i = 1; i < numStrings; ++i) {
+	for (int i = 1; i < numStrings; i++) { // was i=1 and ++i
 		strings[i] = va_arg(args, const char*);
 	}
 
@@ -5048,11 +5207,12 @@ int displayStrings(int numStrings, const char* firstString, ...) { // generated 
 
 		int availableSpace = 16 * 2 - strlen(prefix);
 		int stringLength = strlen(strings[currentIndex]);
+		int avail = availableSpace; //was availableSpace - 3
 
-		if (stringLength > availableSpace - 3) {
+		if (stringLength > avail) {
 			char buffer[availableSpace - 2]; // Space for string + null terminator
-			strncpy(buffer, strings[currentIndex], availableSpace - 3);
-			buffer[availableSpace - 3] = '\0';
+			strncpy(buffer, strings[currentIndex], avail - 3); // 3 for "..."?
+			buffer[avail] = '\0';
 			strcat(buffer, "...");
 			lcd.send_string(buffer, 14);
 		} else {

@@ -3,6 +3,11 @@
 class FlowRateSensor {
      // modified from https://www.amazon.com/gp/customer-reviews/RXFZUXSSWB9MY/ref=cm_cr_dp_d_rvw_ttl?ie=UTF8&ASIN=B07MY7K249
  
+    #define SIMULATED_OUTPUT_VALUE 12.345
+ 
+    private:
+        bool simulatedOutputEnabled = false;
+        
     public:
         int flowSensorPin = PIN__FLOW_SENSOR; // flow sensor attached to pin 6 (pin must also be an interrupt ("int") pin)
         #define FLOW_CALIBRATION_FACTOR 5.5 // Note: F=(0.2*Q)±2% for OP's sensor, Q=L/Min, and F is pulse freq in 1/s. your model is GR-108 (1")
@@ -23,6 +28,10 @@ class FlowRateSensor {
         void flowPulseCounter() {
             flowPulseCount++;
             //digitalWrite(LED, !digitalRead(LED));
+        }
+        
+        void setSimulatedOutput(bool simulatedOutputEnabled_) {
+            simulatedOutputEnabled = simulatedOutputEnabled_;
         }
         
         float readFlowRateGPH(bool delayForFreshReading=false) { // FIXME: one time this returned 0.03GPH when the filter was clearly running just fine (delayForFreshReading was set to true) // update: I think this was because oldTime wasn't being set, so the GPH was based on a time interval that was way too long
@@ -46,7 +55,12 @@ class FlowRateSensor {
                 //attachInterrupt(digitalPinToInterrupt(flowSensorPin), flowPulseCounter, FALLING); // Enable interrupt again
                 attachInterrupt(flowSensorPin, &FlowRateSensor::flowPulseCounter, this, FALLING); // Enable interrupt again
             }
-            return flowRateGPH; // Return the flow rate for this reading
+            
+            if (simulatedOutputEnabled) {
+                return SIMULATED_OUTPUT_VALUE;
+            } else {
+                return flowRateGPH; // Return the flow rate for this reading
+            }
         } 
         
 };

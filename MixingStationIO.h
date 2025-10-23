@@ -111,6 +111,7 @@ class MixingStationIO : public IOExpansionBoard {
         system_tick_t waterLastPumpedToAquarium = 0;
         
         #define TANK_WATER_CHANGE_GALLONS               4.25 //5.25 // Note: Current tank is approx 11.5" x 23", with an average depth of 3.5" between liquid level sensors. That equals 4 gallons, so we'll plan for 5.25 to be safe
+        #define TANK_WATER_CHANGE_SIPHON_GALLONS        3.75 // testing
         #define CALIBRATION_SENSOR_GALLONS              1.0 // gallons of water the calibration sensor is positioned to detect
         #define MAIN_PUMP_TIMEOUT_SEC                   15*60 // TODO: choose actual values here
         #define TAP_WATER_FILL_TIMEOUT_SEC              8*60 // TODO: choose actual values here
@@ -121,8 +122,8 @@ class MixingStationIO : public IOExpansionBoard {
         //#define TOTAL_GALLONS_FOR_SEACHEM_PRIME_CALC    10 // TODO: choose actual value // used to calculate Seachem Prime dosage
         #define DOSING_PUMP_ML_PER_SEC                  1.18 // calibrate using dosePrime() with overrideDosageTimeSeconds parameter (tested 0.85s to dispense 1mL)
         #define DOSING_PUMP_MAX_TIME_SEC                15 //10
-        #define TAP_WATER_PULSES_PER_GALLON             14254 // @ 0.48 GPM //14711 // @0.48 GPM. was: 13703 // Average from measurements via dispenseWaterCalibrationMode(): 13893 @ 0.50 GPM, 13542 @ 0.15 GPM, 13674 @ 0.51 GPM
-        #define RODI_WATER_PULSES_PER_GALLON            10637 // @ 1.03 GPM //8953  // Average from measurements via dispenseWaterCalibrationMode(): 8968 @ 1.18 GPM, 8892 @ 1.18 GPM, 8998 @ 1.05 GPM
+        #define TAP_WATER_PULSES_PER_GALLON             14272 // @ 0.41GPM //14534 // @ 0.42GPH //15326 // @ 0.44 GPM; 13726 // @ 0.49 GPM; was 14254 before 1/21/24 // // @ 0.48 GPM //14711 // @0.48 GPM. was: 13703 // Average from measurements via dispenseWaterCalibrationMode(): 13893 @ 0.50 GPM, 13542 @ 0.15 GPM, 13674 @ 0.51 GPM
+        #define RODI_WATER_PULSES_PER_GALLON            10633 //@ 1.25GPM //10761 // @ 0.95GPM //11286 // @ 1.13 GPM // 10280 // @ 0.95 GPM; was 10637 before 1/21/24 // @ 1.03 GPM //8953  // Average from measurements via dispenseWaterCalibrationMode(): 8968 @ 1.18 GPM, 8892 @ 1.18 GPM, 8998 @ 1.05 GPM
         #define RODI_TO_TAP_TARGET_RATIO                4.23 // see measurements below as well as google doc notes/calculations
         
         MixingStationIO(int disablePin, bool resetPinLogicLevel, int gpioTestPin, byte i2cAddressAddition, LCDUniversal *lcd_, RelayModule *relayModule_, Adafruit_MCP23017 *mcp2_) : IOExpansionBoard(disablePin, resetPinLogicLevel, gpioTestPin, i2cAddressAddition) { //IOExpansionBoard(int disablePin, bool resetPinLogicLevel, int gpioTestPin, byte i2cAddressAddition=0x00) {
@@ -144,7 +145,7 @@ class MixingStationIO : public IOExpansionBoard {
 
 
         // testing: overload used to calibrate based on 1-gallon liquid level sensor. returns number of pulses until liquid level sensor is tripped 
-        void dispenseWaterCalibrationMode(bool useTapInsteadOfRodi) {
+        bool dispenseWaterCalibrationMode(bool useTapInsteadOfRodi) {
             float tapWaterGallons = useTapInsteadOfRodi ? 1.5 : 0; // extra gallons just as buffer
             float rodiWaterGallons = useTapInsteadOfRodi ? 0 : 1.5;
             bool cancelledViaButtonPress = false;
@@ -157,9 +158,11 @@ class MixingStationIO : public IOExpansionBoard {
             Particle.publish("dispenseWaterCalibrationMode", String::format("Running water flow meter calibration for %s...", useTapInsteadOfRodi ? "tap water" : "RODI water"));
             bool success = dispenseWater(tapWaterGallons, rodiWaterGallons, true, calibrationPulses, calibrationGPM, cancelledViaButtonPress, debug_numInvalidReadings);
             
+            bool totalSuccess = true;
             if (success && !cancelledViaButtonPress && debug_numInvalidReadings == 0) {
                 PushNotification::send(String::format("%s flow meter calibration complete. calibrationModePulses: %u, calibrationGPM: %.2f", useTapInsteadOfRodi ? "Tap water" : "RODI water", calibrationPulses, calibrationGPM));
             } else {
+                totalSuccess = false;
                 PushNotification::send(String::format("%s calibration failed. Flags: success: %d, cancelledViaButtonPress: %d, debug_numInvalidReadings: %u, calibrationPulses: %u", 
                     useTapInsteadOfRodi ? "Tap water" : "RODI water", success, cancelledViaButtonPress, debug_numInvalidReadings, calibrationPulses));
                 //Particle.publish("dispenseWaterCalibrationMode", String::format("Error running calibration. success: %d, cancelledViaButtonPress: %d, debug_numInvalidReadings: %u, calibrationPulses: %u", 
@@ -168,6 +171,7 @@ class MixingStationIO : public IOExpansionBoard {
             
             drainReservoir();
             PushNotification::send("Calibration draining complete");
+            return totalSuccess;
         }
         
         
@@ -845,7 +849,8 @@ class MixingStationIO : public IOExpansionBoard {
             // turn on canister filter and verify that flow rate is > zero
             if (!enableFilterAndHeatWithAlert()) {
                 // note: alert will already have gone out in this case
-                return false;
+                error = true;
+                //return false;
             }
 
             // ============================================================================================================
@@ -855,7 +860,8 @@ class MixingStationIO : public IOExpansionBoard {
             waterLastPumpedToAquarium = millis();
             
             if (!publishFuture.isDone()) {
-                delay(3000); // wait a bit longer
+                lcd->display("(Waiting for", "publish...)", 0);
+                delay(30*1000); // wait a bit longer
             }
             
             if (error) {
@@ -900,7 +906,7 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
                 return false;
             }
 
-            int calculatedDosageTimeMs = round(dosageMl/(DOSING_PUMP_ML_PER_SEC)*1000);
+            unsigned int calculatedDosageTimeMs = round(dosageMl/(DOSING_PUMP_ML_PER_SEC)*1000);
             /*
             int calculatedDosageTimeMs;
             if (overrideDosageTimeSeconds <= 0) {
@@ -913,18 +919,58 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
             }
             */
 
-            unsigned long totalSensorDurationMs = 0;
-
+            unsigned long totalSensorDurationUs = 0;
             unsigned long sensorLastTriggeredTs = 0;
             bool sensorLastTriggerState = false;
             unsigned int numTriggers = 0;
 
+            // testing, as during the 3rd successive retry the device resets
+            Particle.process();
+
             this->digitalWriteOrReset(MixingStationIO::Components::DOSING_PUMP, HIGH);
-            unsigned long start = millis();
-            unsigned long timeToFirstDetection = 0;
+            unsigned long startUs = micros();
+            unsigned long timeToFirstDetectionUs = 0; // now in uS
             bool timedOut = false;
+            const unsigned long maxTime = DOSING_PUMP_MAX_TIME_SEC*1000*1000;
             
             // see how often we detect liquid
+            // testing v2: using microseconds instead of milliseconds in case millis is too coarse of a resolution to yeild a meaningfully accurate "totalSensorDuration" figure
+            unsigned long nowUs;
+            do {
+                nowUs = micros();
+                bool sensorTriggered = (this->digitalReadOrReset(MixingStationIO::Components::DOSING_PUMP_SENSOR) == ACTIVE_LOW);
+                if (sensorTriggered && !sensorLastTriggerState) { // if sensor was just triggered
+                    sensorLastTriggeredTs = nowUs;
+                    sensorLastTriggerState = true;
+                } else if (!sensorTriggered && sensorLastTriggerState) { // sensor was just untriggered
+                    totalSensorDurationUs += (nowUs - sensorLastTriggeredTs);
+                    numTriggers++;
+                    sensorLastTriggerState = false;
+                    if (numTriggers == 1) {
+                        timeToFirstDetectionUs = nowUs - startUs;
+                    }
+                }
+                
+                if (nowUs - startUs >= maxTime) {
+                    timedOut = true;
+                    break;
+                }
+            } 
+
+            // note: allow up tp 10 seconds to detect the first liquid, e.g. if Prime solution was just swapped out
+            while (nowUs - startUs < ((numTriggers == 0) ? 10*1000*1000 : calculatedDosageTimeMs*1000 + timeToFirstDetectionUs)); // note: we measure dosing time based on when the first liquid was detected
+            unsigned long actualElapsedTime = micros() - startUs;
+            
+            this->digitalWriteOrReset(MixingStationIO::Components::DOSING_PUMP, LOW);
+            
+            if (timedOut) {
+                lcd->display("Error: Timed out", String::format("after %d ms", DOSING_PUMP_MAX_TIME_SEC*1000), 3);
+                Particle.publish("dosePrime()", String::format("Error: Dosing timed out after %d ms", DOSING_PUMP_MAX_TIME_SEC*1000));
+                return false;
+            }
+
+            // v1 below
+            /*
             do {
                 bool sensorTriggered = (this->digitalReadOrReset(MixingStationIO::Components::DOSING_PUMP_SENSOR) == ACTIVE_LOW);
                 if (sensorTriggered && !sensorLastTriggerState) { // if sensor was just triggered
@@ -944,6 +990,7 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
                     break;
                 }
             } 
+
             // note: allow up tp 10 seconds to detect the first liquid, e.g. if Prime solution was just swapped out
             while (millis() - start < ((numTriggers == 0) ? 10*1000 : calculatedDosageTimeMs + timeToFirstDetection)); // note: we measure dosing time based on when the first liquid was detected
             unsigned long actualElapsedTime = millis() - start;
@@ -955,21 +1002,24 @@ Particle.publish("pumpWaterToAquarium()", "Success!");
                 Particle.publish("dosePrime()", String::format("Error: Dosing timed out after %d ms", DOSING_PUMP_MAX_TIME_SEC*1000));
                 return false;
             }
+            */
             
             // make sure we detected sufficient liquid being dispensed
             // note: when dosing 1mL, observed num triggers = 126..175 and total sensor duration = 295..325ms; when dosing 2mL, observed num triggers = 335 and total sensor duration = 625ms
             // note: we also only expect 80% of this, to give ourselves a reasonable safety margin
             // older note: In testing this for 1000ms at a time, the average value for totalSensorDurationMs was 360-400ms, with numTriggers from 180-190.
             //   when Water supply was running out, totalSensorDurationMs went down to 22 and then 0 (numTriggers went down to 7 and 0)
-            const float EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS = (300 * 0.50); // includes 50% fudge factor
-            if (totalSensorDurationMs < EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS * dosageMl) {
+            // ** update: when dosePrime() kept failing (with totalSensorDurations of about 75ms), it turned out that the IR RX/TX pair was dirty with dried seachem prime. Wiping them off with your finger fixed the problem, and now the dosing is succeeding (with totalSensorDurations around 198ms)
+            // ** update 2: after adding longer tubing for the dosing pump, we started erroring out here. after measuring twice, we got just about 1ml when: totalSensorDurationMs = 104 (then 80), timeToFirstDetection = 313ms (then 44ms), numTriggers = 88 (then 67).
+            const float EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS = (100 * 0.50); // loosening this up a bit (120 * 0.50); // includes 50% fudge factor  // (300 * 0.50); // includes 50% fudge factor 
+            if (totalSensorDurationUs < EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS * 1000 * dosageMl) {
                 lcd->display("Error: Volume", "too low");
-                Particle.publish("dosePrime()", String::format("Error: Dosing sensor detected too little Seachem Prime. totalSensorDurationMs: %u, dosageMl: %.1f, timeToFirstDetection: %u ms, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS: %.2f, numTriggers: %d", 
-                    totalSensorDurationMs, dosageMl, timeToFirstDetection, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS, numTriggers));
+                Particle.publish("dosePrime()", String::format("Error: Dosing sensor detected too little Seachem Prime. totalSensorDurationUs: %u us, dosageMl: %.1f, timeToFirstDetectionUs: %u ms, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS: %.2f, numTriggers: %d", 
+                    totalSensorDurationUs, dosageMl, timeToFirstDetectionUs/1000, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS, numTriggers));
                 return false;
             } else {
-                Particle.publish("dosePrime()", String::format("Successfully dosed %.1f mL of Seachem Prime in %u ms. totalSensorDurationMs: %u, timeToFirstDetection: %u ms, numTriggers: %d, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS: %.2f", 
-                    dosageMl, actualElapsedTime, totalSensorDurationMs, timeToFirstDetection, numTriggers, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS));
+                Particle.publish("dosePrime()", String::format("Successfully dosed %.1f mL of Seachem Prime in %u ms. totalSensorDurationUs: %u ms, timeToFirstDetectionUs: %u ms, numTriggers: %d, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS: %.2f", 
+                    dosageMl, actualElapsedTime/1000, totalSensorDurationUs/1000, timeToFirstDetectionUs/1000, numTriggers, EXPECTED_TOTAL_SENSOR_DURATION_PER_ML_MS));
             }
 
             lcd->display("... success!", "", 2);
