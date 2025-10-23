@@ -2506,10 +2506,10 @@ void loop() {
             mcp2.digitalWrite(PIN_IOEXP2__COOLER_PUMP, LOW);
             beepBuzzer(1);
             flag__coolingPumpTest = false;
-			// Wait for button release
-			while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
-    			Particle.process();
-			}
+            // Wait for button release
+            while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
+                Particle.process();
+            }
             delay(100);
             return;
         }
@@ -3672,14 +3672,19 @@ void doTempTempChecks(double &tempInF, double &tempOutF, double &flowRate) {
         lcd.setRGB(LCD_RGB_NORMAL);
     }
 
-    if ((tempInF < 74 || tempOutF < 74) && (mixingStation.waterLastPumpedToAquarium == 0 || millis() - mixingStation.waterLastPumpedToAquarium > 5*60*1000)) { // new: allow time for heating if water was just changed
+    if ((tempInF < 73 || tempOutF < 73) && (mixingStation.waterLastPumpedToAquarium == 0 || millis() - mixingStation.waterLastPumpedToAquarium > 10*60*1000)) { // new: allow time for heating if water was just changed
         if (!flag__tempTooLow) {
             flag__tempTooLow = true;
             errorBeep();
             errorBeep();
             lcd.setRGB(LCD_RGB_WARNING);
             lcd.display("WARNING: Temp", "too low", 1);
-            PushNotification::send(String::format("WARNING: Temperature too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF));
+            
+            //PushNotification::send(String::format("WARNING: Temperature too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF));
+            static PushNotification notification_tempTooLow(60min);
+            notification_tempTooLow.sendWithCooldown(String::format("WARNING: Temperature too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF), false); //~~~~~true); // stopping false critical alarms for now
+
+            
             /*
             for (int i=0; i<3; i++) {
                 // jiggle the relay in case it's stuck
@@ -3693,7 +3698,7 @@ void doTempTempChecks(double &tempInF, double &tempOutF, double &flowRate) {
     } else if (flag__tempTooLow) {
         flag__tempTooLow = false;
         relayModule.setHeater(true);
-        PushNotification::send(String::format("Update: Temperature no longer too low (inlet: %.2fF, outlet: %.2fF). Re-enabling heater.", tempInF, tempOutF));
+        PushNotification::send(String::format("Update: Temperature no longer too low (inlet: %.2fF, outlet: %.2fF).", tempInF, tempOutF));
         lcd.setRGB(LCD_RGB_NORMAL);
     }
 }
@@ -5419,80 +5424,70 @@ bool runFullWaterChangeAutomatic(WaterChangeMode waterChangeMode, WaterChangeAut
 }
 
 int displayStrings(int numStrings, const char* firstString, ...) {
-	va_list args;
-	va_start(args, firstString);
+    va_list args;
+    va_start(args, firstString);
 
-	const char* strings[numStrings];
-	strings[0] = firstString;
+    const char* strings[numStrings];
+    strings[0] = firstString;
 
-	for (int i = 1; i < numStrings; i++) { // was i=1 and ++i
-		strings[i] = va_arg(args, const char*);
-	}
+    for (int i = 1; i < numStrings; i++) { // was i=1 and ++i
+        strings[i] = va_arg(args, const char*);
+    }
 
-	va_end(args);
+    va_end(args);
 
-	int currentIndex = 0;
-	bool exit = false;
+    int currentIndex = 0;
+    bool exit = false;
 
-	const char* prefix = "> ";
-	while (!exit) {
-		lcd.clear();
-		lcd.setCursor(0,0); //?
-		lcd.send_string(prefix);
+    const char* prefix = "> ";
+    while (!exit) {
+        lcd.clear();
+        lcd.setCursor(0,0); //?
+        lcd.send_string(prefix);
 
-		int availableSpace = 16 * 2 - strlen(prefix);
-		int stringLength = strlen(strings[currentIndex]);
-		int avail = availableSpace; //was availableSpace - 3
+        int availableSpace = 16 * 2 - strlen(prefix);
+        int stringLength = strlen(strings[currentIndex]);
+        int avail = availableSpace; //was availableSpace - 3
 
-		if (stringLength > avail) {
-			char buffer[availableSpace - 2]; // Space for string + null terminator
-			strncpy(buffer, strings[currentIndex], avail - 3); // 3 for "..."?
-			buffer[avail] = '\0';
-			strcat(buffer, "...");
-			lcd.send_string(buffer, 14);
-		} else {
-			lcd.send_string(strings[currentIndex], 14);
-		}
+        if (stringLength > avail) {
+            char buffer[availableSpace - 2]; // Space for string + null terminator
+            strncpy(buffer, strings[currentIndex], avail - 3); // 3 for "..."?
+            buffer[avail] = '\0';
+            strcat(buffer, "...");
+            lcd.send_string(buffer, 14);
+        } else {
+            lcd.send_string(strings[currentIndex], 14);
+        }
 
-		// wait for the primary button to be released after updating LCD display, since we'll loop here after it's pressed
-		delay(200); // debounce
-		while (temp_isButton1Pressed() == ButtonPress::PRESSED) {
-			// Wait for a button press
-    		Particle.process();
-		}
-		
-		//delay(200); // Debounce delay
+        // wait for the primary button to be released after updating LCD display, since we'll loop here after it's pressed
+        delay(200); // debounce
+        while (temp_isButton1Pressed() == ButtonPress::PRESSED) {
+            // Wait for a button press
+            Particle.process();
+        }
+        
+        //delay(200); // Debounce delay
 
-		// Wait for a button press
-		while (temp_isButton1Pressed() != ButtonPress::PRESSED && temp_isButton2Pressed() != ButtonPress::PRESSED) {
-    		Particle.process();
-		}
+        // Wait for a button press
+        while (temp_isButton1Pressed() != ButtonPress::PRESSED && temp_isButton2Pressed() != ButtonPress::PRESSED) {
+            Particle.process();
+        }
 
-		if (temp_isButton1Pressed() == ButtonPress::PRESSED) {
-			currentIndex = (currentIndex + 1) % numStrings;
-			/*while (digitalRead(PIN__PUSHBUTTON) == ACTIVE_LOW) {
-				// Wait for button release
-    			Particle.process();
-	    	}*/
-		} else if (temp_isButton2Pressed() == ButtonPress::PRESSED) {
-			exit = true;
-    		lcd.clear();
-			// Wait for button release
-			while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
-    			Particle.process();
-			}
-		}
-	}
+        if (temp_isButton1Pressed() == ButtonPress::PRESSED) {
+            currentIndex = (currentIndex + 1) % numStrings;
+            /*while (digitalRead(PIN__PUSHBUTTON) == ACTIVE_LOW) {
+                // Wait for button release
+                Particle.process();
+            }*/
+        } else if (temp_isButton2Pressed() == ButtonPress::PRESSED) {
+            exit = true;
+            lcd.clear();
+            // Wait for button release
+            while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
+                Particle.process();
+            }
+        }
+    }
 
-	return currentIndex;
+    return currentIndex;
 }
-
-
-
-
-
-
-
-
-
-
