@@ -387,12 +387,14 @@ class CO2BubbleSensor_v3 {
             // ensure CO2 isn't running after hours (note: allow some leeway for debugging?)
             //if (!isActiveTimeOfDay() && (co2Running || bpsLongWindow > 0.05)) {
             if (!isActiveTimeOfDay() && Time.minute() > 5 && co2Running) {//bpsLong > 0.05) {
-                if (Time.isValid() ) { // allow a few minutes' buffer time
-                    _currentFault = Faults::BUBBLES_CONTINUING_TOO_LONG_AFTER_SHUTOFF;
-                    stopCO2(); // just in case this didn't work previously
-                    static PushNotification notification_BUBBLES_CONTINUING_TOO_LONG_AFTER_SHUTOFF_2(5min);
-                    notification_BUBBLES_CONTINUING_TOO_LONG_AFTER_SHUTOFF_2.sendWithCooldown(String::format("ERROR: CO2 detected running after hours (%.2f bps). Shutting off CO2.", getBubblesPerSecondCombined()), true);
-                    pushDebugInfo();
+                if (Time.isValid()) { // allow a few minutes' buffer time
+                    if (getBubblesPerSecondCombined() >= 0.01) { // new: stop false alerts
+                        _currentFault = Faults::BUBBLES_CONTINUING_TOO_LONG_AFTER_SHUTOFF;
+                        stopCO2(); // just in case this didn't work previously
+                        static PushNotification notification_BUBBLES_CONTINUING_TOO_LONG_AFTER_SHUTOFF_2(15min);
+                        notification_BUBBLES_CONTINUING_TOO_LONG_AFTER_SHUTOFF_2.sendWithCooldown(String::format("ERROR: CO2 detected running after hours (%.2f bps). Shutting off CO2.", getBubblesPerSecondCombined()), true);
+                        pushDebugInfo();
+                    }
                 }
             }
             

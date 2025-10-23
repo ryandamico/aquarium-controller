@@ -225,7 +225,8 @@ This Atmel guide recommends that you include decoupling capacitors to all Vcc-GN
 
 /*#define PIN__PUMP_CONTROL       A0
 #define PIN__PUMP_V_SENSE       A1*/
-#define PIN__TOPOFF_FLOW_METER  D6 // was A0 -- see important note about D6 above
+//#define PIN__TOPOFF_FLOW_METER  D6 // was A0 -- see important note about D6 above
+#define PIN__COOLER_TEMP_SENSORS  D6 // was A0 -- see important note about D6 above // note: hard-wired 4.7k pullup
 #define PIN__LIQUID_LEVEL_SENSOR_CAPACITIVE  A2
 #define PIN__LOWER_LIQUID_LEVEL_SENSOR_CAPACITIVE  A3 // new connector pinout (looking top down onto PCB with buzzer to the left): signal, +5V, GND (top to bottom)
 #define PIN__WATER_LEAK_SENSOR  A1 // active high (note to test: make sure you bridge contacts e.g. with hands; don't just touch one to make the test LED light up)
@@ -248,7 +249,8 @@ This Atmel guide recommends that you include decoupling capacitors to all Vcc-GN
 #define PIN_IOEXP2__LED_1                   3 //A3
 #define PIN_IOEXP2__LED_2                   5 //A5
 #define PIN_IOEXP2__LED_3                   7 //A7
-#define PIN_IOEXP2__UNUSED_OUTPUT           11 //B3 -- unused two-pin output header
+//#define PIN_IOEXP2__UNUSED_OUTPUT           11 //B3 -- unused two-pin output header
+#define PIN_IOEXP2__COOLER_PUMP           11 //B3 -- unused two-pin output header
 #define PIN_IOEXP2__INTERNAL_TEST_GPIO      0 // A0 reserved for internal use
 
 #include "SharedUtilities.h"
@@ -329,13 +331,38 @@ void swWatchdogHandler() {
 // set DS18B20 data pin and flag as the only sensor on bus
 DS18B20 tempSensorIn(PIN__TEMP_PROBE_IN, true);
 DS18B20 tempSensorOut(PIN__TEMP_PROBE_OUT, true);
+DS18B20 coolerTempSensors(PIN__COOLER_TEMP_SENSORS, false); // two sensors in parallel
 
 FlowRateSensor flowRateSensor;
 Adafruit_MCP23017 mcp2;
 CO2BubbleSensor_v3 co2BubbleSensor(PIN__CO2_SENSOR_IN, PIN_IOEXP2__C02_SOLENOID, &mcp2);
 
+#define MAXRETRY 3  // Define once globally or outside the function if reused
+
+float getTemp(DS18B20* ds18b20, uint8_t* addr = nullptr) {
+  float _temp;
+  float fahrenheit = NAN;
+  int i = 0;
+
+  // Retry logic with a simple inline conditional fetch
+  do {
+    if (addr != nullptr) {
+      _temp = ds18b20->getTemperature(addr);
+    } else {
+      _temp = ds18b20->getTemperature();
+    }
+  } while (!ds18b20->crcCheck() && i++ < MAXRETRY);
+
+  if (i <= MAXRETRY) {
+    fahrenheit = ds18b20->convertToFahrenheit(_temp);
+  }
+
+  return fahrenheit;
+}
+
+/*
 float getTemp(DS18B20 *ds18b20){
-    #define MAXRETRY 3
+  #define MAXRETRY 3
   float _temp;
   float fahrenheit = -9999;
   int   i = 0;
@@ -354,6 +381,7 @@ float getTemp(DS18B20 *ds18b20){
   }
   return fahrenheit;
 }
+*/
 
 /* ---------- Retained variables ---------- */
 // note: for retained variables, the order they're declared here matters -- see https://docs.particle.io/reference/device-os/api/backup-ram-sram/making-changes-to-the-layout-or-types-of-retained-variables/
@@ -438,8 +466,8 @@ void startup() {
     pinMode(PIN__PIEZO_BUZZER, OUTPUT); 
     pinSetDriveStrength(PIN__PIEZO_BUZZER, DriveStrength::HIGH); // TODO: consider checking for returned success/error code
     
-    pinMode(PIN__TOPOFF_FLOW_METER, INPUT_PULLUP);
-    
+    //pinMode(PIN__TOPOFF_FLOW_METER, INPUT_PULLUP);
+
     if (digitalRead(PIN__PUSHBUTTON) == ACTIVE_LOW) { // if button is held during power-up, enter into safe mode
         delay(10); // debounce
         if (digitalRead(PIN__PUSHBUTTON) == ACTIVE_LOW) {
@@ -787,8 +815,8 @@ void initializeMcp2() {
         mcp2.digitalWrite(PIN_IOEXP2__CUTOFF_BALL_VALVE, HIGH); // keep open by default
         mcp2.pinMode(PIN_IOEXP2__C02_SOLENOID, OUTPUT); // TODO: should this happen both here and in the CO2 bubble controller?
         mcp2.digitalWrite(PIN_IOEXP2__C02_SOLENOID, LOW);
-        mcp2.pinMode(PIN_IOEXP2__UNUSED_OUTPUT, OUTPUT); // currently unused
-        mcp2.digitalWrite(PIN_IOEXP2__UNUSED_OUTPUT, LOW);
+        mcp2.pinMode(PIN_IOEXP2__COOLER_PUMP, OUTPUT); // currently unused
+        mcp2.digitalWrite(PIN_IOEXP2__COOLER_PUMP, LOW);
         mcp2.pinMode(PIN_IOEXP2__INTERNAL_TEST_GPIO, OUTPUT); 
         mcp2.digitalWrite(PIN_IOEXP2__INTERNAL_TEST_GPIO, LOW); // impt: always keep low for internal validation checks
         mcp2.pinMode(PIN_IOEXP2__LED_1, OUTPUT); 
@@ -866,6 +894,10 @@ uint8_t warningBits = 0x00;
 Timer dstTimer(1000*60*60, SharedUtilities::checkAndAdjustDST);
 
 volatile bool setting__disableFlowRateSensor = false;
+
+// testing
+const int NUM_COOLER_SENSORS = 2;
+uint8_t sensorAddresses[NUM_COOLER_SENSORS][8]; // testing
 
 void setup() {
     
@@ -1414,6 +1446,17 @@ void setup() {
     */
     
     mixingStationConnected = mixingStation.isConnected();
+    
+    // new
+    coolerTempSensors.resetsearch();                 // initialise for sensor search
+    for (int i = 0; i < NUM_COOLER_SENSORS; i++) {   // try to read the sensor addresses
+        coolerTempSensors.search(sensorAddresses[i]); // and if available store
+    }
+
+    Particle.publish("Cooler sensor 1 address", String::format("0x%x", sensorAddresses[0]));
+    delay(1000);
+    Particle.publish("Cooler sensor 2 address", String::format("0x%x", sensorAddresses[1]));
+    delay(1000);
 }
 
 void pushbuttonHandler() {
@@ -1665,6 +1708,8 @@ bool doWaterLevelCheck(bool optSkipSensorTest=false) {
     
     return false;
 }
+
+volatile bool flag__coolingPumpTest = false;
 
 volatile bool cloud_samplePump_flag = false;
 volatile bool flag_doWaterLevelCheck = false;
@@ -2316,8 +2361,70 @@ bool allButtonsReleased() { // TODO: ~debounce
     */
 }
 
+// Helper to convert 64-bit address to 8-byte array
+void uint64ToAddress(uint64_t value, uint8_t addr[8]) {
+    for (int i = 0; i < 8; i++) {
+        addr[i] = (value >> (8 * i)) & 0xFF;
+    }
+}
+
+// Optional helper: pass uint64 directly to getTemp()
+float getTempFrom64(DS18B20* ds, uint64_t addr64) {
+    uint8_t addr[8];
+    uint64ToAddress(addr64, addr);
+    return getTemp(ds, addr);
+    }
+
+// Predefined 64-bit addresses
+const uint64_t COOLER_TEMP_IN_ADDR  = 0x20017030;
+const uint64_t COOLER_TEMP_OUT_ADDR = 0x20017028;
+
 void loop() {
-    
+    if (flag__coolingPumpTest) {
+        // wait for button release
+        while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
+            Particle.process();
+        }
+
+        static system_tick_t lastTempUpdate = 0;        
+        if (lastTempUpdate == 0 || millis() - lastTempUpdate > 3000) {
+            lcd.setCursor(0,0);
+            lcd.send_string("Btn: Cooling pmp");
+            
+            mcp2.digitalWrite(PIN_IOEXP2__LED_3, HIGH);
+            float coolerTempIn  = getTemp(&coolerTempSensors, sensorAddresses[0]); //getTempFrom64(&coolerTempSensors, COOLER_TEMP_IN_ADDR);
+            float coolerTempOut = getTemp(&coolerTempSensors, sensorAddresses[1]);
+            mcp2.digitalWrite(PIN_IOEXP2__LED_3, LOW);
+
+            lcd.setCursor(0,1);
+            lcd.send_string(
+                isnan(coolerTempIn) ? "--" :
+                String(coolerTempIn).substring(0, 5) + (char)223 + "  -> ");
+            lcd.setCursor(8,1);
+            lcd.send_string(
+                isnan(coolerTempOut) ? "--" :
+                String(coolerTempOut).substring(0, 5) + (char)223 + "     ");
+        }
+        
+        if (temp_isButton2Pressed() == ButtonPress::PRESSED) {
+            mcp2.digitalWrite(PIN_IOEXP2__COOLER_PUMP, LOW);
+            beepBuzzer(1);
+            flag__coolingPumpTest = false;
+			// Wait for button release
+			while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
+    			Particle.process();
+			}
+            delay(100);
+            return;
+        }
+
+        bool isButton1Pressed = (temp_isButton1Pressed() == ButtonPress::PRESSED);
+        mcp2.digitalWrite(PIN_IOEXP2__COOLER_PUMP, isButton1Pressed); //mcp2.digitalWrite(PIN_IOEXP2__LED_3, LOW);
+
+        Particle.process();
+        return;
+    }
+
     // **TODO**: safety in case data corruption leads to phantom I2C button presses?
     //**TODO** ensure that heater/filter are on unless we're in a special fault mode where they should stay off
 
@@ -2346,7 +2453,7 @@ void loop() {
         }
 
         int itemIndex = displayStrings(
-            10,
+            11,
           //"                                " // 32 chars
             "Gravel siphon  cleaning mode",
             "Canister filter cleaning mode",
@@ -2357,6 +2464,9 @@ void loop() {
             "Set flag__cloud_tempTest", 
             "Run flow calibration (tap)",
             "Run flow calibration (rodi)",
+
+            "Cooling pump control",
+
             "Exit"
         );
         
@@ -2416,6 +2526,11 @@ void loop() {
                     }
                     break;
                 }
+            case 9:
+                lcd.clear(); // reset display
+                flag__coolingPumpTest = !flag__coolingPumpTest;
+                delay(100); // extra button release debounce
+                return; // go right back to looo()
             default:
                 return;
         }
@@ -2879,7 +2994,7 @@ return;
                 WITH_LOCK(Wire) { pushbutton2Value = mcp2.digitalRead(PIN_IOEXP2__PUSHBUTTON_2); }
                 lcd.setCursor(0,1);
                 lcd.send_string(String::format("%d%d%d%d%d %s%d", 
-                    digitalRead(PIN__TOPOFF_FLOW_METER),
+                    0, //digitalRead(PIN__TOPOFF_FLOW_METER),
                     digitalRead(PIN__LIQUID_LEVEL_SENSOR_CAPACITIVE),
                     digitalRead(PIN__LOWER_LIQUID_LEVEL_SENSOR_CAPACITIVE),
                     digitalRead(PIN__WATER_LEAK_SENSOR),
