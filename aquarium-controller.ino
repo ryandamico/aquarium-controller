@@ -1569,14 +1569,14 @@ void setup() {
                       COOLING_TEMP_SENSOR_INLET,
                       COOLING_TEMP_SENSOR_OUTLET,
                       COOLING_TEMP_SENSOR_TANK,
-                      tempSensorIn,
+                      &tempSensorIn,
                       &mcp2,
                       PIN_IOEXP2__COOLER_PUMP,
                       PIN_IOEXP2__LED_3,
                       temp_isButton1Pressed,   // << existing helpers
                       temp_isButton2Pressed,
                       &lcd);
-    coolingPump.setEnabled(false); // disable by default
+    coolingPump.setEnabled(true); // enable by default
 }
 
 void pushbuttonHandler() {

@@ -1,11 +1,7 @@
-// CoolingPump.h — consolidated, duplicate‑free
+// CoolingPump.h — Cooling‑loop controller for DIY aquarium chiller
 // -----------------------------------------------------------------------------
-// * Single‑bus, three hard‑coded DS18B20 addresses.
-// * Burst‑cooling state machine (Outlet‑Rise) + logging + push notifications.
-// * Optional HW‑watchdog pet callback.
-// * Flags: VERBOSE_PUSH for chatty mode.
-// * Public helpers: setEnabled / isEnabled, isCooling, getStats, direct temp
-//   accessors for Particle.variable.
+// Now with burst‑level cooling statistics to evaluate effectiveness.
+// -----------------------------------------------------------------------------
 #pragma once
 
 #include "Particle.h"
@@ -15,157 +11,221 @@
 #include "buttons.h"
 #include "LCDUniversal.h"
 
-
-// ───────────────────────── FLAGS
-constexpr bool VERBOSE_PUSH = true;
-
-// ───────────────────────── LOG + PUSH HELPERS
+// ---------------------------------------------------------------------------
+// Helper utilities (publishing throttled push / log events)
+// ---------------------------------------------------------------------------
 inline void logEvent(const char* txt) {
-    static uint32_t last = 0;
-    uint32_t now = millis();
-    if (now - last < 1000UL) return;             // 1Hz max
-    last = now;
     if (Particle.connected()) Particle.publish("cooler_evt", txt, PRIVATE);
 }
-inline void pushMsg(const char* txt, bool always = false) {
-    if (!always && !VERBOSE_PUSH) return;
-    static PushNotification pn(120s);
+inline void pushMsg(const char* txt) {
+    static PushNotification pn(5min);
     pn.sendWithCooldown(txt);
 }
- 
+// ---------------------------------------------------------------------------
+
 class CoolingPump {
-    public:
-        // ───── Runtime control ─────
-        void setEnabled(bool en) { _enabled = en; }
-        bool isEnabled() const   { return _enabled; }
-        bool isCooling() const   { return _state == State::BURST; }
-    
-        struct Stats {
-            double tankInitF, currentTankF, minTankF, maxTankF;
-            double inletF, outletF;
-            double pumpMinutes;
+public:
+    // ─────────────────── Public temperature accessors ────────────────────
+    double getAquariumTempF() const { _updateTemps(); return _tAquaF; }
+    double getInletTempF()    const { _updateTemps(); return _tInletF; }
+    double getOutletTempF()   const { _updateTemps(); return _tOutletF; }
+    double getBathTempF()     const { _updateTemps(); return _tBathF;  }
+    double getTankTempF()     const { return getBathTempF(); } // legacy alias
+
+    // ───────────────────────────── Statistics ─────────────────────────────
+    struct Stats {
+        // Instantaneous temps
+        double aquaCurrentF;
+        double inletF, outletF;
+        double bathCurrentF;  double currentTankF; // alias
+        double bathMinF;      double minTankF;     // alias
+        double bathMaxF;      double maxTankF;     // alias
+        // Lifetime pump runtime
+        double pumpMinutes;
+        // Cooling effectiveness
+        uint32_t totalBursts;
+        double   totalAquaDropF;  // Σ(aquaStart – aquaEnd)
+        double   totalBathRiseF;  // Σ(bathEnd  – bathStart)
+        double   lastAquaStartF, lastAquaEndF;
+        double   lastBathStartF, lastBathEndF;
+    };
+
+    Stats getStats() const {
+        _updateTemps();
+        return {
+            _tAquaF,
+            _tInletF,
+            _tOutletF,
+            _tBathF,   _tBathF,
+            _bathMinF, _bathMinF,
+            _bathMaxF, _bathMaxF,
+            _totalPumpMs / 60000.0,
+            _totalBursts,
+            _totalAquaDropF,
+            _totalBathRiseF,
+            _lastAquaStartF, _lastAquaEndF,
+            _lastBathStartF, _lastBathEndF
         };
-        Stats getStats() const {
-            _updateTemps();
-            return Stats{ _tankInitF, _tTank, _minTankF, _maxTankF,
-                          _tIn, _tOut, _totalPumpMs / 60000.0 };
-        }
-    
-        // Temp getters for Particle.variable
-        double getInletTempF()   const { _updateTemps(); return _tIn; }
-        double getOutletTempF()  const { _updateTemps(); return _tOut; }
-        double getTankTempF()    const { _updateTemps(); return _tTank; }        
-        
-        struct Cfg {
-            float    T_HIGH = 74.0f, T_LOW = 72.0f;
-            float    dT_MIN_BATH = 4.0f, dT_STOP_COIL = 0.8f;
-            uint32_t MIN_RUN_MS = 60000UL, OFF_PAUSE_MS = 300000UL;
-            uint32_t RUNTIME_CAP = 90 * 60000UL, NOTIFY_IV_MS = 3UL * 60 * 60 * 1000UL;
-        } cfg;
-    
-        void begin(DS18B20* bus, const uint8_t* addrIn, const uint8_t* addrOut, const uint8_t* addrTank,
-                   Adafruit_MCP23017* io, uint8_t pumpPin, uint8_t ledPin,
-                   std::function<ButtonPress(void)> btn1, std::function<ButtonPress(void)> btn2,
-                   LCDUniversal* lcd, std::function<void(void)> petCb = nullptr) {
-            _bus = bus; 
+    }
 
-            for (int i = 0; i < 8; i++) _addrIn[i] = addrIn[i];
-            for (int i = 0; i < 8; i++) _addrOut[i] = addrOut[i];
-            for (int i = 0; i < 8; i++) _addrTank[i] = addrTank[i];
-            
-            _mcp = io; _pumpPin = pumpPin; _ledPin = ledPin; _pet = petCb;
-            _btn1 = btn1; _btn2 = btn2; _lcd = lcd;
-            _mcp->pinMode(_pumpPin, OUTPUT); _mcp->digitalWrite(_pumpPin, LOW);
-            _mcp->pinMode(_ledPin , OUTPUT); _mcp->digitalWrite(_ledPin , LOW);
-            _updateTemps(true);
-            _tankInitF = _tTank; _minTankF = _maxTankF = _tTank;
-            pushMsg("Cooler controller ready", true);
-            logEvent("init_ready");
-        }
-    
-        void tick() {
-            if (_pet) _pet();
-            if (!_enabled) return;
-            _updateTemps();
-            if (!_valid) { _pumpOff(); return; }
-            _updateStats();
-            _stateMachine();
-        }
-    
-    private:
-        // ─── Config/state ----
-        bool _enabled = false;
-        uint8_t _addrIn[8];
-        uint8_t _addrOut[8];
-        uint8_t _addrTank[8];
-        DS18B20* _bus;
-        std::function<void(void)> _pet = nullptr;
-        Adafruit_MCP23017* _mcp = nullptr; uint8_t _pumpPin = 0, _ledPin = 0;
-        std::function<ButtonPress(void)> _btn1, _btn2; LCDUniversal* _lcd = nullptr;
-    
-        // temps
-        mutable float _tIn = NAN;
-        mutable float _tOut = NAN;
-        mutable float _tTank = NAN;
-        mutable bool _valid = false;
-        mutable uint32_t _lastReadMs = 0;
-        float _tankInitF = NAN, _minTankF = 999, _maxTankF = -999; 
-        uint32_t _totalPumpMs = 0;
+    // ───────────────────────────── Lifecycle ─────────────────────────────
+    void begin(
+        DS18B20*                       busShared,
+        const uint8_t*                 addrInlet,
+        const uint8_t*                 addrOutlet,
+        const uint8_t*                 addrBath,
+        DS18B20*                       aquaProbe,
+        Adafruit_MCP23017*             io,
+        uint8_t                        pumpPin,
+        uint8_t                        ledPin,
+        std::function<ButtonPress()>   btn1,
+        std::function<ButtonPress()>   btn2,
+        LCDUniversal*                  lcd,
+        std::function<void(void)>      petCb = nullptr)
+    {
+        _busShared = busShared;
+        _aquaProbe = aquaProbe;
+        _mcp       = io;
+        _pumpPin   = pumpPin;
+        _ledPin    = ledPin;
+        _pet       = petCb;
+        _btn1      = btn1;
+        _btn2      = btn2;
+        _lcd       = lcd;
 
-        // timers / state machine
-        enum class State { IDLE, BURST, LOCK }; State _state = State::IDLE;
-        uint32_t _burstStart = 0, _lastStop = 0;
-    
-        // ─── Sensor helpers ----
-        float _readF(const uint8_t* addr) const {
-            const int MAX = 3; int n = 0; double c = NAN;
-            do { c = _bus->getTemperature(const_cast<uint8_t*>(addr), /*forceSelect=*/true); if (_pet) _pet(); } while (!_bus->crcCheck() && ++n < MAX);
-            float f = _bus->convertToFahrenheit(c);
-            return (f < 0 || f > 120) ? NAN : f;
+        for (int i = 0; i < 8; ++i) {
+            _addrInlet[i]  = addrInlet[i];
+            _addrOutlet[i] = addrOutlet[i];
+            _addrBath[i]   = addrBath[i];
         }
-        void _updateTemps(bool force = false) const {
-            if (!force && millis() - _lastReadMs < 1000) return;
-            _lastReadMs = millis();
-            _tIn = _readF(_addrIn);
-            _tOut = _readF(_addrOut);
-            _tTank = _readF(_addrTank);
-            _valid = !(isnan(_tIn) || isnan(_tOut) || isnan(_tTank));
+
+        _mcp->pinMode(_pumpPin, OUTPUT);
+        _mcp->digitalWrite(_pumpPin, LOW);
+        _mcp->pinMode(_ledPin, OUTPUT);
+        _mcp->digitalWrite(_ledPin, LOW);
+
+        _updateTemps(true);
+        _bathMinF = _bathMaxF = _tBathF;
+        logEvent("cooling_init_ready");
+    }
+
+    // ─────────────────────────── Runtime control ──────────────────────────
+    void setEnabled(bool en) { _enabled = en; }
+    bool isEnabled()  const  { return _enabled; }
+    bool isCooling()  const  { return _state == State::BURST; }
+
+    void tick() {
+        if (_pet) _pet();
+        if (!_enabled) return;
+
+        _updateTemps();
+        if (!_valid) { _pumpOff(); return; }
+
+        _updateStats();
+        _stateMachine();
+    }
+
+    // ─────────────────────────── Configuration ────────────────────────────
+    struct Cfg {
+        float    T_HIGH       = 78.0f;
+        float    T_LOW        = 76.0f;
+        float    dT_MIN_BATH  = 4.0f;
+        float    dT_STOP_COIL = 0.8f;
+        uint32_t MIN_RUN_MS   = 60'000UL;
+        uint32_t OFF_PAUSE_MS = 300'000UL;
+    } cfg;
+
+private:
+    // Handles
+    DS18B20* _busShared = nullptr; DS18B20* _aquaProbe = nullptr;
+    Adafruit_MCP23017* _mcp = nullptr; uint8_t _pumpPin=0,_ledPin=0;
+    std::function<void(void)> _pet; std::function<ButtonPress()> _btn1,_btn2;
+    LCDUniversal* _lcd=nullptr;
+
+    // Addresses
+    uint8_t _addrInlet[8]{}, _addrOutlet[8]{}, _addrBath[8]{};
+
+    // Cached temps
+    mutable float _tAquaF=NAN,_tInletF=NAN,_tOutletF=NAN,_tBathF=NAN;
+    mutable bool _valid=false; mutable uint32_t _lastReadMs=0;
+
+    // Stats
+    float _bathMinF=999.0f,_bathMaxF=-999.0f; uint32_t _totalPumpMs=0;
+    // Burst effectiveness
+    uint32_t _totalBursts=0; double _totalAquaDropF=0, _totalBathRiseF=0;
+    double _lastAquaStartF=NAN,_lastAquaEndF=NAN,_lastBathStartF=NAN,_lastBathEndF=NAN;
+    // Intermediate stats push helper
+    uint32_t _lastInterStatsMs = 0;
+    static constexpr uint32_t INTER_STATS_MS = 30UL * 60UL * 1000UL; // 30 minutes
+
+    // State machine
+    bool _enabled=false; enum class State{IDLE,BURST,LOCK} _state=State::IDLE;
+    uint32_t _burstStart=0,_lastStop=0;
+
+    // Sensor reading helpers ------------------------------------------------
+    float _readBusF(const uint8_t* a) const {
+        double c=_busShared->getTemperature(const_cast<uint8_t*>(a),true);
+        float f=_busShared->convertToFahrenheit(c); return (f<0||f>120)?NAN:f;
+    }
+    float _readAquaF() const {
+        double c=_aquaProbe->getTemperature(); float f=_aquaProbe->convertToFahrenheit(c);
+        return (f<0||f>120)?NAN:f;
+    }
+    void _updateTemps(bool force=false) const {
+        if(!force&&millis()-_lastReadMs<5000) return; _lastReadMs=millis();
+        _tAquaF=_readAquaF(); _tInletF=_readBusF(_addrInlet); _tOutletF=_readBusF(_addrOutlet); _tBathF=_readBusF(_addrBath);
+        _valid=!(isnan(_tAquaF)||isnan(_tInletF)||isnan(_tOutletF)||isnan(_tBathF));
+    }
+    void _updateStats(){ if(_tBathF<_bathMinF) _bathMinF=_tBathF; if(_tBathF>_bathMaxF) _bathMaxF=_tBathF; }
+
+    // GPIO helpers ----------------------------------------------------------
+    void _pumpOn(){ _mcp->digitalWrite(_pumpPin,HIGH); _mcp->digitalWrite(_ledPin,HIGH);}    
+    void _pumpOff(){ _mcp->digitalWrite(_pumpPin,LOW);  _mcp->digitalWrite(_ledPin,LOW);}    
+
+    // State machine ---------------------------------------------------------
+    void _stateMachine(){ const uint32_t now=millis(); switch(_state){
+    case State::IDLE:
+        if(_tAquaF<cfg.T_HIGH) return;
+        if((_tAquaF-_tBathF)<cfg.dT_MIN_BATH) return;
+        _pumpOn(); _burstStart = now; _state = State::BURST;
+        _lastInterStatsMs = now;
+        _lastAquaStartF=_tAquaF; _lastBathStartF=_tBathF;
+        char startBuf[64];
+        snprintf(startBuf, sizeof(startBuf), "Burst start: Aquarium %.4f°F, Cooling bath %.4f°F", _lastAquaStartF, _lastBathStartF);
+        logEvent("burst_start"); pushMsg(startBuf); break;
+    case State::BURST:
+        // Send intermediate stats every 30 minutes while pump runs
+        if(now - _lastInterStatsMs >= INTER_STATS_MS) {
+            char midBuf[80];
+            double dropSoFar = _lastAquaStartF - _tAquaF;
+            snprintf(midBuf, sizeof(midBuf), "Burst %lu min: Aquarium↓%.4f°F (%.1f→%.1f)", (now - _burstStart)/60000UL, dropSoFar, _lastAquaStartF, _tAquaF);
+            pushMsg(midBuf);
+            _lastInterStatsMs = now;
         }
-        void _updateStats() {
-            if (!_valid) return;
-            if (_tTank < _minTankF) _minTankF = _tTank;
-            if (_tTank > _maxTankF) _maxTankF = _tTank;
+        if(now - _burstStart < cfg.MIN_RUN_MS) break;
+        if((_tOutletF - _tInletF <= cfg.dT_STOP_COIL) || (_tAquaF <= cfg.T_LOW)) {
+            _pumpOff(); _totalPumpMs += now - _burstStart; _state = State::LOCK; _lastStop = now;
+            _lastAquaEndF = _tAquaF; _lastBathEndF = _tBathF;
+            _totalAquaDropF += (_lastAquaStartF - _lastAquaEndF);
+            _totalBathRiseF += (_lastBathEndF - _lastBathStartF);
+            _totalBursts++;
+            char endBuf[80];
+            double drop = _lastAquaStartF - _lastAquaEndF;
+            snprintf(endBuf, sizeof(endBuf), "Burst end: Aquarium↓%.4f°F (%.1f→%.1f), Cooling bath↑%.4f°F", drop, _lastAquaStartF, _lastAquaEndF, _lastBathEndF - _lastBathStartF);
+            logEvent("burst_end"); pushMsg(endBuf);
         }
-    
-        // ─── GPIO helpers ----
-        void _pumpOn()  { _mcp->digitalWrite(_pumpPin, HIGH); _mcp->digitalWrite(_ledPin, HIGH); }
-        void _pumpOff() { _mcp->digitalWrite(_pumpPin, LOW ); _mcp->digitalWrite(_ledPin, LOW );  }
-    
-        // ─── State machine ----
-        void _stateMachine() {
-            uint32_t now = millis();
-            switch (_state) {
-                case State::IDLE:
-                    if (_tTank < cfg.T_HIGH) return;
-                    if ((_tTank - _tIn) < cfg.dT_MIN_BATH) return;
-                    _pumpOn(); 
-                    _burstStart = now; 
-                    _state = State::BURST;
-                    pushMsg("Burst start", true); 
-                    logEvent("burst_start");
-                    break;
-                case State::BURST:
-                    if (now - _burstStart < cfg.MIN_RUN_MS) break;
-                    if ((_tOut - _tIn) < cfg.dT_STOP_COIL || _tTank <= cfg.T_LOW) {
-                        _pumpOff(); _totalPumpMs += now - _burstStart; _state = State::LOCK; _lastStop = now;
-                        char buf[48]; snprintf(buf, sizeof(buf), "Burst end %.1fF", _tTank);
-                        pushMsg(buf, true); logEvent("burst_end");
-                    }
-                    break;
-                case State::LOCK:
-                    if (now - _lastStop >= cfg.OFF_PAUSE_MS) _state = State::IDLE;
-                    break;
-            }
-        }
-        
+        break;
+        if((_tOutletF-_tInletF<=cfg.dT_STOP_COIL)||(_tAquaF<=cfg.T_LOW)){
+            _pumpOff(); _totalPumpMs+=now-_burstStart; _state=State::LOCK; _lastStop=now;
+            _lastAquaEndF=_tAquaF; _lastBathEndF=_tBathF;
+            _totalAquaDropF+=(_lastAquaStartF-_lastAquaEndF);
+            _totalBathRiseF+=(_lastBathEndF-_lastBathStartF);
+            _totalBursts++;
+            char endBuf[80];
+            double drop=_lastAquaStartF-_lastAquaEndF;
+            snprintf(endBuf, sizeof(endBuf), "Burst end: Aquarium↓%.4f°F (%.1f→%.1f), Cooling bath↑%.4f°F", drop, _lastAquaStartF, _lastAquaEndF, _lastBathEndF-_lastBathStartF);
+            logEvent("burst_end"); pushMsg(endBuf);
+        } break;
+    case State::LOCK:
+        if(now-_lastStop>=cfg.OFF_PAUSE_MS) _state=State::IDLE; break; }}
 };
