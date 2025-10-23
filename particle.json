@@ -1,0 +1,18 @@
+{
+  "name": "aquarium-controller",
+  "description": "Particle IoT aquarium automation system",
+  "version": "1.0.0",
+  "author": "Ryan D'Amico",
+  "license": "Private",
+  "build": {
+    "platform": "argon",
+    "deviceId": "e00fce680a0c2f358dda032f",
+    "deviceName": "Aquarium",
+    "targetVersion": "4.2.0"
+  },
+  "notes": {
+    "platform": "Argon is a Gen 3 device (nRF52840 + ESP32)",
+    "deviceId": "The specific device this code is deployed to",
+    "targetVersion": "Device OS version - OneWire 2.0.4 requires OS < 5.0"
+  }
+}

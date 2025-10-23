@@ -10,7 +10,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$SCRIPT_DIR"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 # Colors for output
 RED='\033[0;31m'
@@ -116,8 +116,8 @@ fi
 
 info "Extracting backup to repository..."
 
-# Remove all files except .git and this script
-find . -maxdepth 1 -not -name '.git' -not -name '.' -not -name '..' -not -name 'commit-backup.sh' -not -name 'README.md' -exec rm -rf {} + 2>/dev/null || true
+# Remove all files except .git, scripts/, config files, and README
+find . -maxdepth 1 -not -name '.git' -not -name '.' -not -name '..' -not -name 'scripts' -not -name 'README.md' -not -name 'particle.json' -not -name '.gitignore' -exec rm -rf {} + 2>/dev/null || true
 
 # Extract the zip file
 unzip -q "$ZIP_FILE" || error_exit "Failed to extract zip file"
