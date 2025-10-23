@@ -147,7 +147,7 @@ class CO2BubbleSensor_v3 {
             }
         }
         
-        bool isCO2Started() {
+        bool isCO2Started() { // NOTE: When mcp2 is disabled in emergency mode in our .ino file, this returns a calue that mistanekly triggers alerts
             //return digitalRead(PIN__CO2_SOLENOID);
             bool state;
 //**TODO** return false if MCP board is disconnected            

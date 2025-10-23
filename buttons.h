@@ -1,7 +1,9 @@
+/*
 #pragma once
 
-enum ButtonPress {
+typedef enum ButtonPress {
     PRESSED,
     NOT_PRESSED,
     READ_ERROR
 };
+*/

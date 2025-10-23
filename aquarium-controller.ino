@@ -69,7 +69,23 @@
 // TODO: report error if handler can't reset the watchdog
 // TODO: optimize HW watchdog logic in rampPump()
 
-#include "buttons.h"
+enum class ControllerModes {
+    NORMAL,
+    TANK_CLEANING_MODE,
+    // TODO: other mode for firmware update?
+};
+ControllerModes controllerMode = ControllerModes::NORMAL;
+//ControllerModes lastControllerMode = ControllerModes::NORMAL;
+
+#include <Particle.h>
+//#include "buttons.h"
+
+typedef enum ButtonPress {
+    PRESSED,
+    NOT_PRESSED,
+    READ_ERROR
+};
+
 #include <RTClibraryDS3231_DL.h>
 #include "CircularBuffer.h"
 #include <RunningAverage.h>
@@ -77,7 +93,9 @@
 #include <Adafruit_MCP23017.h>
 #include "RelayModule.h"
 #include "ControllerIOExp.h"
+#include "CoolingPump.h"
 
+CoolingPump coolingPump;
 // comment out line below to enable piezo buzzer
 //#define DISABLE_BEEPS true
 
@@ -120,10 +138,6 @@
 #include "Utilities.h"
 LCDUniversal lcd;
 //int r,g,b,t=0;
-
-
-#include "CoolingPump.h"
-CoolingPump coolingPump;
 
 const uint8_t COOLING_TEMP_SENSOR_TANK[8]  = { 0x28, 0x90, 0x42, 0x04, 0x00, 0x00, 0x00, 0xCB };
 const uint8_t COOLING_TEMP_SENSOR_INLET[8] = { 0x28, 0xA2, 0xC5, 0x03, 0x00, 0x00, 0x00, 0x54 };
@@ -280,7 +294,6 @@ This Atmel guide recommends that you include decoupling capacitors to all Vcc-GN
 
 
 //WCL_WatchDog hardwareWatchdog;
-
 
 // TODO: consider moving into more elegant classes
 bool waterDetectedOpticalSensor() {
@@ -901,9 +914,9 @@ Timer dstTimer(1000*60*60, SharedUtilities::checkAndAdjustDST);
 
 volatile bool setting__disableFlowRateSensor = false;
 
-double getCoolingInF()  { return static_cast<double>(coolingPump.getInletTempF()); }
-double getCoolingOutF() { return static_cast<double>(coolingPump.getOutletTempF()); }
-double getCoolingTankF() { return static_cast<double>(coolingPump.getTankTempF()); }
+double getCoolingInF()  { return coolingPump.getInletTempF(); }
+double getCoolingOutF() { return coolingPump.getOutletTempF(); }
+double getCoolingTankF() { return coolingPump.getTankTempF(); }
  
 double tempInF = -1;
 double tempOutF = -1;
@@ -944,6 +957,54 @@ void detectAndPublishCoolerTempSensors() {
     Particle.publish("cooler temp sensors", msg, PRIVATE);
 }
 
+ButtonPress temp_isButton1Pressed() {
+    
+    // check for upstairs button #1
+    if (digitalRead(PIN__PUSHBUTTON) == ACTIVE_LOW) {
+        return ButtonPress::PRESSED;
+    }
+
+    // check for downstairs button #1
+    if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_UPPER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
+        // temp sanity check since we had data corruption issues earlier
+        delay(10);
+        if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_UPPER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
+            return ButtonPress::PRESSED;
+        }
+    }
+    
+    return ButtonPress::NOT_PRESSED;
+}
+
+ButtonPress temp_isButton2Pressed() {
+    // check for upstairs button #2
+    
+    uint16_t gpioValues;
+    WITH_LOCK(Wire) { gpioValues = mcp2.readGPIOAB(); }
+    
+    if (gpioValues == 0xffff) { // IO board disconnected
+        return ButtonPress::READ_ERROR;
+    }
+
+    if (bitRead(gpioValues, PIN_IOEXP2__INTERNAL_TEST_GPIO) != LOW) { // unexpected value
+        return ButtonPress::READ_ERROR;
+    }
+
+    if ((bitRead(gpioValues, PIN_IOEXP2__PUSHBUTTON_2) == ACTIVE_LOW)) {
+        return ButtonPress::PRESSED;
+    }
+    
+    // check for downstairs button #2
+    if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_LOWER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
+        // temp sanity check since we had data corruption issues earlier
+        delay(10);
+        if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_LOWER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
+            return ButtonPress::PRESSED;
+        }
+    }
+    
+    return ButtonPress::NOT_PRESSED;
+}
 
 void setup() {
     
@@ -1335,7 +1396,8 @@ void setup() {
     //Particle.function("IOTest2", cloud_ioTest2);
     Particle.function("ioTestToggle", cloud_ioTestToggle);
     Particle.function("tempTest", cloud_tempTest);
-    Particle.function("coolingTest", cloud_coolingTest);
+    //Particle.function("coolingTest", cloud_coolingTest);
+    Particle.function("coolingToggle", cloud_coolingToggle);
     /***********************************************************************************************/
     /** NOTE: These functions can be dangerous and instantly overdose the tank. Use with Caution. **/
     //Particle.function("dosePumpNum", cloud_dosePumpNum);
@@ -1367,7 +1429,8 @@ void setup() {
     // test case: why register not updating?
     Particle.publish("register test 1a", String::format("0x%x", (*(volatile uint32_t *) (WDT_CONFIG_REG)))); // volatile: ????
     ATOMIC_BLOCK() { // ???
-        *(volatile uint32_t *) WDT_CONFIG_REG |= 0x08; // why isn't this write being reflected in the subsequent read?
+        *(volatile uint32_t *) WDT_CONFIG_REG
+        08; // why isn't this write being reflected in the subsequent read?
     }
     delay(150);
     Particle.publish("register test 1b", String::format("0x%x", (*(volatile uint32_t *) (WDT_CONFIG_REG))));
@@ -1506,12 +1569,14 @@ void setup() {
                       COOLING_TEMP_SENSOR_INLET,
                       COOLING_TEMP_SENSOR_OUTLET,
                       COOLING_TEMP_SENSOR_TANK,
+                      tempSensorIn,
                       &mcp2,
                       PIN_IOEXP2__COOLER_PUMP,
                       PIN_IOEXP2__LED_3,
                       temp_isButton1Pressed,   // << existing helpers
                       temp_isButton2Pressed,
                       &lcd);
+    coolingPump.setEnabled(false); // disable by default
 }
 
 void pushbuttonHandler() {
@@ -1866,15 +1931,10 @@ bool startDosingPumpSafe(int dosingPumpNum, float doseMilliliters, long &lastRun
     }
 }
 
-enum class ControllerModes {
-    NORMAL,
-    TANK_CLEANING_MODE,
-    // TODO: other mode for firmware update?
-};
-ControllerModes controllerMode = ControllerModes::NORMAL;
-//ControllerModes lastControllerMode = ControllerModes::NORMAL;
-
-void updateLCD(float tempInF, float tempOutF, float flowRate, ControllerModes controllerMode = ControllerModes::NORMAL) {
+void lcdShowNormal(const float tempInF,
+                   const float tempOutF,
+                   const float flowRate,
+                   const ControllerModes controllerMode) {
     
     // original working version:
     /*
@@ -1977,6 +2037,57 @@ if (mixingStation.debug_digitalReadSafeRetries + mixingStation.debug_digitalWrit
         lcd.send_string(String(flowRate).substring(0, 4) + " GPH  ");
     }
     */
+}
+
+class CoolingPump;         // forward declare
+// ----------------------------------------------------------------------------
+// Renders cooling-loop stats on the 16×2 display when the coolant pump is on.
+// Fits within two rows and avoids dynamic String churn.
+// ----------------------------------------------------------------------------
+void lcdShowCoolingStats(const CoolingPump& cool) {
+    CoolingPump::Stats s = cool.getStats();   // single struct copy
+
+    lcd.setCursor(0,0);
+    // Row-0:  Tank current °F, ΔTcoil
+    // e.g. "Tk 73.1F  Δ0.8 "
+    char line0[17];
+    snprintf(line0, sizeof(line0), "Tk %.1fF  \xE4%.1f",  // \xE4 = ° if custom char
+             s.currentTankF,
+             s.outletF - s.inletF);        // coil delta
+    lcd.send_string(line0);
+
+    lcd.setCursor(0,1);
+    // Row-1:  Pump minutes today + min/max tank
+    // e.g. "Run 12m Mn72 Mx74"
+    char line1[17];
+    snprintf(line1, sizeof(line1), "Run %2dm Mn%2.0f Mx%2.0f",
+             (int)round(s.pumpMinutes),
+             s.minTankF,
+             s.maxTankF);
+    lcd.send_string(line1);
+}
+
+void updateLCD(float tempInF, float tempOutF, float flowRate,
+               ControllerModes controllerMode = ControllerModes::NORMAL) {
+
+    static uint32_t lastToggleMs = 0;
+    static bool     showCooling  = false;
+
+    const bool coolingActive = coolingPump.isCooling();   // NEW helper we added
+
+    // Toggle view every 3 s only when cooler is running
+    if (coolingActive && millis() - lastToggleMs >= 3000UL) {
+        lastToggleMs = millis();
+        showCooling  = !showCooling;
+    } else if (!coolingActive) {
+        showCooling  = false;           // always normal when idle
+    }
+
+    if (showCooling) {
+        lcdShowCoolingStats(coolingPump);
+    } else {
+        lcdShowNormal(tempInF, tempOutF, flowRate, controllerMode);
+    }
 }
 
 /*
@@ -2316,55 +2427,6 @@ void canisterCleaningMode() {
     lcd.clear();    
 }
 
-ButtonPress temp_isButton1Pressed() {
-    
-    // check for upstairs button #1
-    if (digitalRead(PIN__PUSHBUTTON) == ACTIVE_LOW) {
-        return ButtonPress::PRESSED;
-    }
-
-    // check for downstairs button #1
-    if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_UPPER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
-        // temp sanity check since we had data corruption issues earlier
-        delay(10);
-        if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_UPPER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
-            return ButtonPress::PRESSED;
-        }
-    }
-    
-    return ButtonPress::NOT_PRESSED;
-}
-
-ButtonPress temp_isButton2Pressed() {
-    // check for upstairs button #2
-    
-    uint16_t gpioValues;
-    WITH_LOCK(Wire) { gpioValues = mcp2.readGPIOAB(); }
-    
-    if (gpioValues == 0xffff) { // IO board disconnected
-        return ButtonPress::READ_ERROR;
-    }
-
-    if (bitRead(gpioValues, PIN_IOEXP2__INTERNAL_TEST_GPIO) != LOW) { // unexpected value
-        return ButtonPress::READ_ERROR;
-    }
-
-    if ((bitRead(gpioValues, PIN_IOEXP2__PUSHBUTTON_2) == ACTIVE_LOW)) {
-        return ButtonPress::PRESSED;
-    }
-    
-    // check for downstairs button #2
-    if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_LOWER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
-        // temp sanity check since we had data corruption issues earlier
-        delay(10);
-        if ((mixingStation.digitalRead(MixingStationIO::Components::PUSHBUTTON_LOWER) == ACTIVE_LOW) && !mixingStation.lastReadErrorFlag && mixingStation.isConnected(false)) {
-            return ButtonPress::PRESSED;
-        }
-    }
-    
-    return ButtonPress::NOT_PRESSED;
-}
-
 
 /*bool anyButtonPressed_debounced() {
     const unsigned long THRESHOLD_MS = 50;
@@ -2407,10 +2469,10 @@ bool allButtonsReleased() { // TODO: ~debounce
 }
 
 void loop() {
-    ////coolingPump.tick();   // <— replaces the flag__coolingPumpTest block
+    coolingPump.tick();   // <— replaces the flag__coolingPumpTest block
     if (flag__coolingPumpTest) {
         flag__coolingPumpTest = false;
-        coolingPump.runPumpCycleWithLogging();
+        //coolingPump.runPumpCycleWithLogging();
     }
     
     /*
@@ -2464,12 +2526,16 @@ void loop() {
     //**TODO** ensure that heater/filter are on unless we're in a special fault mode where they should stay off
 
     // update core sensor readings
-    static system_tick_t lastSensorUpdate = 0;
-    if (lastSensorUpdate == 0 || millis() - lastSensorUpdate > 1000) { // TODO: can we update every 500ms without messing up flow rate data collection?
-        lastSensorUpdate = millis();
+    static system_tick_t lastSensorUpdate_flowRate = 0;
+    if (lastSensorUpdate_flowRate == 0 || millis() - lastSensorUpdate_flowRate > 1000) { // TODO: can we update every 500ms without messing up flow rate data collection?
+        lastSensorUpdate_flowRate = millis();
+        flowRate = flowRateSensor.readFlowRateGPH();
+    }    
+    static system_tick_t lastSensorUpdate_temp = 0;
+    if (lastSensorUpdate_temp == 0 || millis() - lastSensorUpdate_temp > 3000) { // note: temp reads are slow (750ms each?)
+        lastSensorUpdate_temp = millis();
         tempInF = getTemp(&tempSensorIn);
         tempOutF = getTemp(&tempSensorOut);
-        flowRate = flowRateSensor.readFlowRateGPH();
     }    
     
     // update LCD display
@@ -2761,6 +2827,11 @@ delay(1000); // TODO: consider makig this much longer to reduce false positive a
                 // wait a sec and try again to verify
                 delay(1000);
                 if (mixingStation.digitalReadOrReset(MixingStationIO::Components::CALIBRATION_WATER_SENSOR) == ACTIVE_LOW) {
+                    
+                    static PushNotification notification_waterDetectedInMixingTank(24h);
+                    notification_waterDetectedInMixingTank.sendWithCooldown(String::format("WARNING: Water detected at calibration senor in mixing tank."), false); //~~~~~true); // stopping false critical alarms for now
+                    
+                    /*
                     static unsigned long timeSinceLastAlert = 0;
                     if (millis() - timeSinceLastAlert > 10*60*1000) { // note: this won't start alerting until 10 min (or whatever value is) after MCU (re)start
                         mixingStation.disable();
@@ -2773,6 +2844,7 @@ delay(1000); // TODO: consider makig this much longer to reduce false positive a
                         delay(1000);
                         timeSinceLastAlert = millis();
                     }
+                    */
                 }
             }
         }
@@ -3488,10 +3560,12 @@ if (isLiquidDetectedTop()) {
         // safety in case timed task fails
         if (!CO2BubbleSensor_v3::isActiveTimeOfDay() && Time.minute() > 5 && co2BubbleSensor.isCO2Started()) { // new: added 5 minute grace period
             if (mixingStation.isEnabled()) { //new. eg not via mixingStation.disable(), emergencyIODisable()
-                co2BubbleSensor.stopCO2();
-                errorBeep();
-                static PushNotification notification_co2BackupAlert(10min); 
-                notification_co2BackupAlert.sendWithCooldown("WARNING: C02 stopped via backup. You should never see this!", true);
+                if (digitalRead(PIN__IO_EXP_2_DISABLE) != ACTIVE_LOW) { // new: stop false alerts stemming from water left in mixing tamk
+                    co2BubbleSensor.stopCO2();
+                    errorBeep();
+                    static PushNotification notification_co2BackupAlert(30min); 
+                    notification_co2BackupAlert.sendWithCooldown("WARNING: C02 stopped via backup. You should never see this!", true);
+                }
             }
         }
         /*
@@ -3692,6 +3766,12 @@ int cloud_fillTest(String extra) {
     return 1;
 }
 */
+
+int cloud_coolingToggle(String extra) {
+    bool enable = !coolingPump.isEnabled();
+    coolingPump.setEnabled(enable);
+    return enable;
+}
 
 int cloud_coolingTest(String extra) {
     flag__coolingPumpTest = true;

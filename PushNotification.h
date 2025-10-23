@@ -1,3 +1,4 @@
+#pragma once
 class PushNotification {
     private:
         system_tick_t _lastSent = 0;
@@ -35,13 +36,13 @@ class PushNotification {
                 notification_test.sendWithCooldown("Testing...");
                 return;
                 */
-                if (_lastSentDebugMessage == 0 || (millis() - _lastSentDebugMessage >= 60*1000)) {
-                    _publishFutureDebug = Particle.publish("debug", String::format("Skipping notification; in cooldown period. Message: \"%s\"", String(message)));
+                if (_lastSentDebugMessage == 0 || (millis() - _lastSentDebugMessage >= 60*60*1000)) {
+                    _publishFutureDebug = Particle.publish("debug", String::format("Skipping notification; in cooldown period. Message: \"%s\"", message)); // don't use String(message)
                     _lastSentDebugMessage = millis();
                     delay(1000); // delay so we're not adding to our publish() rate limit
                 } else if (!_debugRateLimitWarningSent) {
                     // skip further notifications so we don't exhaust our publish() rate limit
-                    Particle.publish("debug", String::format("Warning: Skipping further debug notification to protect publish() rate limits. Message: \"%s\"", String(message))); // was getting gibberish for message string earlier
+                    Particle.publish("debug", String::format("Warning: Skipping further debug notification to protect publish() rate limits. Message: \"%s\"", message)); // don't use String(message)
                     delay(1000);
                     _debugRateLimitWarningSent = true;
                 }
