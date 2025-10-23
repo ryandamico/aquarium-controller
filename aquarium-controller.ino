@@ -1,4 +1,3 @@
-
 /** Hardware TODOs:
  * [URGENT] Solder cutoff ball valve to be physically pulled high so it's in the correct state if IO exp is disabled -- ACTUALLY URGENT SINCE SAFEMODE LEAVES VALVE IN WRONG STATE
  *    [x] Then update emergencyIODisable() to disable mcp2 again
@@ -70,6 +69,7 @@
 // TODO: report error if handler can't reset the watchdog
 // TODO: optimize HW watchdog logic in rampPump()
 
+#include "buttons.h"
 #include <RTClibraryDS3231_DL.h>
 #include "CircularBuffer.h"
 #include <RunningAverage.h>
@@ -77,7 +77,6 @@
 #include <Adafruit_MCP23017.h>
 #include "RelayModule.h"
 #include "ControllerIOExp.h"
-
 
 // comment out line below to enable piezo buzzer
 //#define DISABLE_BEEPS true
@@ -122,6 +121,9 @@
 LCDUniversal lcd;
 //int r,g,b,t=0;
 
+
+#include "CoolingPump.h"
+CoolingPump coolingPump;
 
 //rgb_lcd lcd;
 
@@ -1281,7 +1283,7 @@ void setup() {
     //Particle.function("IOTest2", cloud_ioTest2);
     Particle.function("ioTestToggle", cloud_ioTestToggle);
     Particle.function("tempTest", cloud_tempTest);
-
+    Particle.function("coolingTest", cloud_coolingTest);
     /***********************************************************************************************/
     /** NOTE: These functions can be dangerous and instantly overdose the tank. Use with Caution. **/
     //Particle.function("dosePumpNum", cloud_dosePumpNum);
@@ -1457,6 +1459,16 @@ void setup() {
     delay(1000);
     Particle.publish("Cooler sensor 2 address", String::format("0x%x", sensorAddresses[1]));
     delay(1000);
+
+    coolingPump.begin(&coolerTempSensors,
+                      sensorAddresses[0],
+                      sensorAddresses[1],
+                      &mcp2,
+                      PIN_IOEXP2__COOLER_PUMP,
+                      PIN_IOEXP2__LED_3,
+                      temp_isButton1Pressed,   // << existing helpers
+                      temp_isButton2Pressed,
+                      &lcd);
 }
 
 void pushbuttonHandler() {
@@ -2265,12 +2277,6 @@ void canisterCleaningMode() {
     lcd.clear();    
 }
 
-typedef enum ButtonPress {
-    PRESSED,
-    NOT_PRESSED,
-    READ_ERROR
-};
-
 ButtonPress temp_isButton1Pressed() {
     
     // check for upstairs button #1
@@ -2380,6 +2386,8 @@ const uint64_t COOLER_TEMP_IN_ADDR  = 0x20017030;
 const uint64_t COOLER_TEMP_OUT_ADDR = 0x20017028;
 
 void loop() {
+    coolingPump.tick();   // <— replaces the flag__coolingPumpTest block
+    /*
     if (flag__coolingPumpTest) {
         // wait for button release
         while (temp_isButton2Pressed() == ButtonPress::PRESSED) {
@@ -2424,7 +2432,8 @@ void loop() {
         Particle.process();
         return;
     }
-
+    */
+    
     // **TODO**: safety in case data corruption leads to phantom I2C button presses?
     //**TODO** ensure that heater/filter are on unless we're in a special fault mode where they should stay off
 
@@ -2465,7 +2474,7 @@ void loop() {
             "Run flow calibration (tap)",
             "Run flow calibration (rodi)",
 
-            "Cooling pump control",
+            "Cooling pump test",
 
             "Exit"
         );
@@ -3657,6 +3666,11 @@ int cloud_fillTest(String extra) {
     return 1;
 }
 */
+
+int cloud_coolingTest(String extra) {
+    flag__coolingPumpTest = true;
+    return 1;
+}
 
 int cloud_tempTest(String extra) {
     
