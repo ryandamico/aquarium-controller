@@ -1129,7 +1129,7 @@ void setup() {
             /*particle::Future<bool> publishFuture = Particle.publish("push-notification", // https://docs.particle.io/firmware/low-power/stop-sleep-cellular/#the-future
                 String::format("{ \"type\": \"send-message-critical\", \"message\": \"[Aquarium controller] ALERT: Water leak detected. waterLeakDetectionPercent: %.2f""\" }", waterLeakDetectionPercent), 
                 WITH_ACK);*/
-            particle::Future<bool> publishFuture = PushNotification::send(String::format("[Aquarium controller] ALERT: Water leak detected. waterLeakDetectionPercent: %.2f", waterLeakDetectionPercent), true); //send(const char* message, bool criticalAlert=false) // testing
+            particle::Future<bool> publishFuture2 = PushNotification::send(String::format("[Aquarium controller] ALERT: Water leak detected. waterLeakDetectionPercent: %.2f", waterLeakDetectionPercent), true); //send(const char* message, bool criticalAlert=false) // testing
     
             // new
             RunningAverage runningPercent(20);
@@ -1153,14 +1153,14 @@ void setup() {
                     digitalWrite(PIN__DRAIN_BALL_VALVE, LOW);
                     digitalWrite(LED, LOW);
                 }
-                if (Particle.connected() && !publishFuture.isSucceeded()) { // TODO: need to test
+                if (Particle.connected() && !publishFuture2.isSucceeded()) { // TODO: need to test
                     // try again
                     /*
                     publishFuture = Particle.publish("push-notification", // https://docs.particle.io/firmware/low-power/stop-sleep-cellular/#the-future
                         String::format("{ \"type\": \"send-message-critical\", \"message\": \"[Aquarium controller] ALERT: Water leak detected (2). waterLeakDetectionPercent: %.2f""\" }", waterLeakDetectionPercent), 
                         WITH_ACK);
                     */
-                    publishFuture = PushNotification::send(String::format("[Aquarium controller] ALERT: Water leak detected. waterLeakDetectionPercent: %.2f", waterLeakDetectionPercent), true); //send(const char* message, bool criticalAlert=false) // testing
+                    publishFuture2 = PushNotification::send(String::format("[Aquarium controller] ALERT: Water leak detected. waterLeakDetectionPercent: %.2f", waterLeakDetectionPercent), true); //send(const char* message, bool criticalAlert=false) // testing
                     delay(1000); // TODO: test to make sure we don't get stuck in some kind of infinite loop
                 }
                 delay(50); //500);
