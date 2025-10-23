@@ -146,6 +146,25 @@ public:
         uint32_t MAX_CONT_MS     = 12UL * 60UL * 60UL * 1000UL; // 12 hours total/day
     } cfg;
 
+private:
+    // Hardware handles
+    DS18B20* _busShared = nullptr;
+    DS18B20* _aquaProbe = nullptr;
+    Adafruit_MCP23017* _mcp = nullptr;
+    uint8_t _pumpPin = 0;
+    uint8_t _ledPin = 0;
+    LCDUniversal* _lcd = nullptr;
+
+    // Sensor addresses
+    uint8_t _addrInlet[8] = {};
+    uint8_t _addrOutlet[8] = {};
+    uint8_t _addrBath[8] = {};
+
+    // Callbacks
+    std::function<void(void)> _pet;
+    std::function<ButtonPress()> _btn1;
+    std::function<ButtonPress()> _btn2;
+
     // Cached temps
     mutable float _tAquaF=NAN,_tInletF=NAN,_tOutletF=NAN,_tBathF=NAN;
     mutable bool _valid=false; mutable uint32_t _lastReadMs=0;
