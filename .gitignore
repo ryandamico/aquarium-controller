@@ -4,3 +4,5 @@
 # Build artifacts
 lib/
 target/
+
+.DS_Store
