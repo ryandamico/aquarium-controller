@@ -1,3 +1,5 @@
+#pragma once
+
 #include "Waveshare_LCD1602_RGB.h"
 #include "LiquidCrystal_I2C_Spark.h"
 

@@ -125,6 +125,10 @@ LCDUniversal lcd;
 #include "CoolingPump.h"
 CoolingPump coolingPump;
 
+const uint8_t COOLING_TEMP_SENSOR_TANK[8]  = { 0x28, 0x90, 0x42, 0x04, 0x00, 0x00, 0x00, 0xCB };
+const uint8_t COOLING_TEMP_SENSOR_INLET[8] = { 0x28, 0xA2, 0xC5, 0x03, 0x00, 0x00, 0x00, 0x54 };
+const uint8_t COOLING_TEMP_SENSOR_OUTLET[8]   = { 0x28, 0xFF, 0x57, 0x02, 0x00, 0x00, 0x00, 0x8B };
+
 //rgb_lcd lcd;
 
 // TODO: fix issue where pressing the pushbutton runs the topoff pump (!)
@@ -339,28 +343,28 @@ FlowRateSensor flowRateSensor;
 Adafruit_MCP23017 mcp2;
 CO2BubbleSensor_v3 co2BubbleSensor(PIN__CO2_SENSOR_IN, PIN_IOEXP2__C02_SOLENOID, &mcp2);
 
-#define MAXRETRY 3  // Define once globally or outside the function if reused
+float getTemp(DS18B20* ds18b20, const uint8_t* addr = nullptr) {
+    const int MAX_RETRIES = 3;
+    float _temp = NAN;
 
-float getTemp(DS18B20* ds18b20, uint8_t* addr = nullptr) {
-  float _temp;
-  float fahrenheit = NAN;
-  int i = 0;
+    if (!ds18b20) return NAN;
 
-  // Retry logic with a simple inline conditional fetch
-  do {
-    if (addr != nullptr) {
-      _temp = ds18b20->getTemperature(addr);
-    } else {
-      _temp = ds18b20->getTemperature();
+    for (int i = 0; i < MAX_RETRIES; i++) {
+        if (addr) {
+            ds18b20->setAddress((uint8_t*)addr);  // IMPORTANT if using addr
+            _temp = ds18b20->getTemperature(addr);
+        } else {
+            _temp = ds18b20->getTemperature(); // single-drop fallback
+        }
+
+        if (ds18b20->crcCheck()) {
+            return ds18b20->convertToFahrenheit(_temp);
+        }
     }
-  } while (!ds18b20->crcCheck() && i++ < MAXRETRY);
 
-  if (i <= MAXRETRY) {
-    fahrenheit = ds18b20->convertToFahrenheit(_temp);
-  }
-
-  return fahrenheit;
+    return NAN;
 }
+
 
 /*
 float getTemp(DS18B20 *ds18b20){
@@ -897,9 +901,49 @@ Timer dstTimer(1000*60*60, SharedUtilities::checkAndAdjustDST);
 
 volatile bool setting__disableFlowRateSensor = false;
 
-// testing
-const int NUM_COOLER_SENSORS = 2;
-uint8_t sensorAddresses[NUM_COOLER_SENSORS][8]; // testing
+double getCoolingInF()  { return static_cast<double>(coolingPump.getInletTempF()); }
+double getCoolingOutF() { return static_cast<double>(coolingPump.getOutletTempF()); }
+double getCoolingTankF() { return static_cast<double>(coolingPump.getTankTempF()); }
+ 
+double tempInF = -1;
+double tempOutF = -1;
+double flowRate = -1;
+
+void detectAndPublishCoolerTempSensors() {
+    const int NUM_COOLER_SENSORS = 3;
+    uint8_t sensorAddresses[NUM_COOLER_SENSORS][8]; // testing
+
+    coolerTempSensors.resetsearch();
+
+    char msg[512];  // Safe and fixed buffer
+    size_t offset = 0;
+
+    for (int i = 0; i < NUM_COOLER_SENSORS; i++) {
+        uint8_t addr[8];
+        
+        if (coolerTempSensors.search(addr)) {
+            double temp = coolerTempSensors.getTemperature(addr);
+            double tempF = coolerTempSensors.convertToFahrenheit(temp);
+
+            // Format address as string
+            char addrStr[17]; // 8 bytes * 2 chars + null
+            snprintf(addrStr, sizeof(addrStr),
+                     "%02X%02X%02X%02X%02X%02X%02X%02X",
+                     addr[0], addr[1], addr[2], addr[3],
+                     addr[4], addr[5], addr[6], addr[7]);
+
+            offset += snprintf(msg + offset, sizeof(msg) - offset,
+                               "Sensor %d (0x%s): %.4fF  ", i, addrStr, tempF);
+        } else {
+            offset += snprintf(msg + offset, sizeof(msg) - offset,
+                               "Sensor %d: Not found  ", i);
+        }
+    }
+
+    msg[sizeof(msg) - 1] = '\0';  // defensive null terminator
+    Particle.publish("cooler temp sensors", msg, PRIVATE);
+}
+
 
 void setup() {
     
@@ -1258,8 +1302,16 @@ void setup() {
 
     Particle.publishVitals(60*60); // publish vitals every hour
     
+    Particle.variable("tempInF", tempInF);
+    Particle.variable("tempOutF", tempOutF);
+    Particle.variable("flowRate", flowRate);
+    Particle.variable("cooling_inF",  getCoolingInF);
+    Particle.variable("cooling_outF", getCoolingOutF);
+    Particle.variable("cooling_tankF", getCoolingTankF);
+
     //Particle.variable("lastPerfMs", tmp_lastPerfElapsedTimeMs);
-    Particle.variable("tmp_numChecksFailed", tmp_numChecksFailed);
+    //Particle.variable("tmp_numChecksFailed", tmp_numChecksFailed);
+    
     Particle.function("bypassFlowSensorTgl", cloud_bypassFlowSensorTgl);
     Particle.function("toggleTopoff", cloud_toggleTopoff);
     Particle.function("getTempIn", cloud_getTempIn);
@@ -1449,20 +1501,11 @@ void setup() {
     
     mixingStationConnected = mixingStation.isConnected();
     
-    // new
-    coolerTempSensors.resetsearch();                 // initialise for sensor search
-    for (int i = 0; i < NUM_COOLER_SENSORS; i++) {   // try to read the sensor addresses
-        coolerTempSensors.search(sensorAddresses[i]); // and if available store
-    }
-
-    Particle.publish("Cooler sensor 1 address", String::format("0x%x", sensorAddresses[0]));
-    delay(1000);
-    Particle.publish("Cooler sensor 2 address", String::format("0x%x", sensorAddresses[1]));
-    delay(1000);
-
+    detectAndPublishCoolerTempSensors();
     coolingPump.begin(&coolerTempSensors,
-                      sensorAddresses[0],
-                      sensorAddresses[1],
+                      COOLING_TEMP_SENSOR_INLET,
+                      COOLING_TEMP_SENSOR_OUTLET,
+                      COOLING_TEMP_SENSOR_TANK,
                       &mcp2,
                       PIN_IOEXP2__COOLER_PUMP,
                       PIN_IOEXP2__LED_3,
@@ -2092,10 +2135,6 @@ bool flag__tempTooHigh = false;
 bool flag__tempTooLow = false;
 bool flag__flowRateTooLow = false;
 
-float tempInF = -1;
-float tempOutF = -1;
-float flowRate = -1;
-
 system_tick_t timeSinceLcdUpdate = 0;
 
 // temp
@@ -2367,26 +2406,13 @@ bool allButtonsReleased() { // TODO: ~debounce
     */
 }
 
-// Helper to convert 64-bit address to 8-byte array
-void uint64ToAddress(uint64_t value, uint8_t addr[8]) {
-    for (int i = 0; i < 8; i++) {
-        addr[i] = (value >> (8 * i)) & 0xFF;
-    }
-}
-
-// Optional helper: pass uint64 directly to getTemp()
-float getTempFrom64(DS18B20* ds, uint64_t addr64) {
-    uint8_t addr[8];
-    uint64ToAddress(addr64, addr);
-    return getTemp(ds, addr);
-    }
-
-// Predefined 64-bit addresses
-const uint64_t COOLER_TEMP_IN_ADDR  = 0x20017030;
-const uint64_t COOLER_TEMP_OUT_ADDR = 0x20017028;
-
 void loop() {
-    coolingPump.tick();   // <— replaces the flag__coolingPumpTest block
+    ////coolingPump.tick();   // <— replaces the flag__coolingPumpTest block
+    if (flag__coolingPumpTest) {
+        flag__coolingPumpTest = false;
+        coolingPump.runPumpCycleWithLogging();
+    }
+    
     /*
     if (flag__coolingPumpTest) {
         // wait for button release
@@ -3554,7 +3580,7 @@ if (isLiquidDetectedTop()) {
 }
 
 
-void doTempTempChecks(float &tempInF, float &tempOutF, float &flowRate) {
+void doTempTempChecks(double &tempInF, double &tempOutF, double &flowRate) {
     if (tempInF > 83 || tempOutF > 90) {
         if (!flag__tempTooHigh) {
             flag__tempTooHigh = true;
